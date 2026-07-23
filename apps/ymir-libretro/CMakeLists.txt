@@ -1,5 +1,6 @@
 add_library(ymir_libretro SHARED
     src/libretro.cpp
+    src/cdrom_loader.cpp
 )
 
 set_target_properties(ymir_libretro PROPERTIES

@@ -1,5 +1,7 @@
 #include "libretro.h"
 
+#include "cdrom_loader.hpp"
+
 #include <ymir/sys/saturn.hpp>
 
 #include <ymir/media/loader/loader.hpp>
@@ -317,6 +319,9 @@ static struct {
     retro_input_state_t input_state_cb = nullptr;
     retro_log_printf_t log_cb = nullptr;
     bool use_input_bitmasks = false;
+
+    // Frontend VFS interface (>= v3), used for physical CD-ROM (cdrom://) access
+    const retro_vfs_interface *vfs = nullptr;
 
     // Video state
     const uint32_t *fb_ptr = nullptr;
@@ -886,13 +891,17 @@ static bool disc_set_eject_state(bool ejected) {
         // Load the selected disc before closing the tray
         if (core.disc_index < core.disc_paths.size()) {
             const auto &path = core.disc_paths[core.disc_index];
+            auto disc_log = [](ymir::media::MessageType type, std::string msg) {
+                auto level = (type == ymir::media::MessageType::Error) ? RETRO_LOG_ERROR : RETRO_LOG_INFO;
+                LOG(level, "[Ymir] %s\n", msg.c_str());
+            };
             ymir::media::Disc disc;
-            bool loaded = ymir::media::LoadDisc(
-                path, disc, false,
-                [](ymir::media::MessageType type, std::string msg) {
-                    auto level = (type == ymir::media::MessageType::Error) ? RETRO_LOG_ERROR : RETRO_LOG_INFO;
-                    LOG(level, "[Ymir] %s\n", msg.c_str());
-                });
+            bool loaded;
+            if (ymir_libretro::IsCDROMPath(path)) {
+                loaded = ymir_libretro::LoadCDROMDisc(core.vfs, path, disc, disc_log);
+            } else {
+                loaded = ymir::media::LoadDisc(path, disc, false, disc_log);
+            }
             if (loaded) {
                 core.saturn->EjectDisc();
                 core.saturn->LoadDisc(std::move(disc));
@@ -1084,6 +1093,14 @@ RETRO_API void retro_set_environment(retro_environment_t cb) {
     if (cb(RETRO_ENVIRONMENT_GET_INPUT_BITMASKS, &bitmasks))
         core.use_input_bitmasks = bitmasks;
 
+    // Request the VFS interface (v3+) so the frontend exposes physical CD-ROM
+    // drives to us via the "cdrom://" scheme (RetroArch "Load Disc").
+    struct retro_vfs_interface_info vfs_info{};
+    vfs_info.required_interface_version = 3;
+    vfs_info.iface = nullptr;
+    if (cb(RETRO_ENVIRONMENT_GET_VFS_INTERFACE, &vfs_info))
+        core.vfs = vfs_info.iface;
+
     struct retro_log_callback log{};
     if (cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &log))
         core.log_cb = log.log;
@@ -1261,13 +1278,17 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game) {
     core.disc_index = 0;
 
     // Load first disc
+    auto disc_log = [](ymir::media::MessageType type, std::string msg) {
+        auto level = (type == ymir::media::MessageType::Error) ? RETRO_LOG_ERROR : RETRO_LOG_INFO;
+        LOG(level, "[Ymir] %s\n", msg.c_str());
+    };
     ymir::media::Disc disc;
-    bool loaded = ymir::media::LoadDisc(
-        core.disc_paths[0], disc, false,
-        [](ymir::media::MessageType type, std::string msg) {
-            auto level = (type == ymir::media::MessageType::Error) ? RETRO_LOG_ERROR : RETRO_LOG_INFO;
-            LOG(level, "[Ymir] %s\n", msg.c_str());
-        });
+    bool loaded;
+    if (ymir_libretro::IsCDROMPath(core.disc_paths[0])) {
+        loaded = ymir_libretro::LoadCDROMDisc(core.vfs, core.disc_paths[0], disc, disc_log);
+    } else {
+        loaded = ymir::media::LoadDisc(core.disc_paths[0], disc, false, disc_log);
+    }
 
     if (!loaded) {
         LOG(RETRO_LOG_ERROR, "[Ymir] Failed to load disc: %s\n", core.disc_paths[0].c_str());
