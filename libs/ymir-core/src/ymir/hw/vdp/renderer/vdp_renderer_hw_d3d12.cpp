@@ -1073,7 +1073,7 @@ struct Direct3D12VDPRenderer::Impl {
             if (!vdp2.uploadBuffer.Allocate(size, alignment, fence->GetCompletedValue(), outAlloc)) {
                 // TODO: consider increasing the upload buffer size or allocating overflow buffers.
                 // For now we'll just log the error and fail
-                YMIR_DEV_ASSERT();
+                YMIR_DEV_CHECK();
                 std::string message =
                     fmt::format("Failed to allocate {} bytes (align {}) in VDP2 upload buffer", size, 4);
                 devlog::warn<grp::dx12_vdp2>("{}", message);
