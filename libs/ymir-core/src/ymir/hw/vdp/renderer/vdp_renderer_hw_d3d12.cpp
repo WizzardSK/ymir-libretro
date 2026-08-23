@@ -30,7 +30,6 @@ CMRC_DECLARE(ymir_core_shaders);
 #include <vector>
 
 using namespace ymir::gpu::d3d12;
-using namespace ymir::core::config::hw_vdp;
 
 namespace ymir::vdp {
 
@@ -423,13 +422,11 @@ private:
 
 struct Direct3D12VDPRenderer::Impl {
     Impl(VDPState &state, const config::VDP2AccessPatternsConfig &vdp2AccessPatternsConfig,
-         const config::VDP2DebugRender &vdp2DebugRenderOptions, core::Configuration::HardwareRenderer &hwRenderConfig)
+         const config::VDP2DebugRender &vdp2DebugRenderOptions)
         : vdpState(state)
-        , hwRenderConfig(hwRenderConfig)
         , vdp2(vdp2AccessPatternsConfig, vdp2DebugRenderOptions) {}
 
     VDPState &vdpState;
-    core::Configuration::HardwareRenderer &hwRenderConfig;
 
     D3D12Device device;
 
@@ -1555,9 +1552,8 @@ struct Direct3D12VDPRenderer::Impl {
         // render lines up to Y-1 then sync the state, unless Y=0, in which case we just sync the state.
 
         if (y > 0) {
-            const bool renderLayers =
-                (hwRenderConfig.vdp2SyncInterval == VDP2VRAMSyncInterval::Scanline && vdp2.vramDirty) ||
-                vdp2.cramDirty || vdp2.rotRegsDirty || vdp2.bgRenderParamsDirty || vdp2.composeParamsDirty;
+            const bool renderLayers = vdp2.vramDirty || vdp2.cramDirty || vdp2.rotRegsDirty ||
+                                      vdp2.bgRenderParamsDirty || vdp2.composeParamsDirty;
             const bool compose = vdp2.composeParamsDirty;
             if (renderLayers) {
                 VDP2RenderLayerLines(y - 1);
@@ -1577,9 +1573,6 @@ struct Direct3D12VDPRenderer::Impl {
         VDP2ComposeLines(VRes - 1);
 
         VDP2UpdateState();
-        if (hwRenderConfig.vdp2SyncInterval == VDP2VRAMSyncInterval::Frame) {
-            VDP2FlushVRAM();
-        }
 
         // ---------------------------
         // TODO: this section is just for testing; remove it
@@ -1601,11 +1594,11 @@ struct Direct3D12VDPRenderer::Impl {
                                               &vdp2.cpuCommonRenderParams, 0);
         cmdList->SetComputeRootDescriptorTable(1, vdp2.drawBGsDescs.gpuHandle);
         cmdList->Dispatch(kMaxResH / 32, kMaxResV, 6);
-        cmdList->Close();
 
         // ---------------------------
 
-        // Submit command list
+        // Close and submit command list
+        cmdList->Close();
         cmdQueue->ExecuteCommandLists(1, cmdList.GetAddressOfBase());
 
         // Advance frame
@@ -1624,10 +1617,9 @@ struct Direct3D12VDPRenderer::Impl {
 // ---------------------------------------------------------------------------------------------------------------------
 
 Direct3D12VDPRenderer::Direct3D12VDPRenderer(VDPState &state, const config::VDP2DebugRender &vdp2DebugRenderOptions,
-                                             const config::VDP2AccessPatternsConfig &vdp2AccessPatternsConfig,
-                                             core::Configuration::HardwareRenderer &hwRenderConfig)
-    : HardwareVDPRendererBase(VDPRendererType::Direct3D12, hwRenderConfig)
-    , m_impl(std::make_unique<Impl>(state, vdp2AccessPatternsConfig, vdp2DebugRenderOptions, hwRenderConfig)) {}
+                                             const config::VDP2AccessPatternsConfig &vdp2AccessPatternsConfig)
+    : HardwareVDPRendererBase(VDPRendererType::Direct3D12)
+    , m_impl(std::make_unique<Impl>(state, vdp2AccessPatternsConfig, vdp2DebugRenderOptions)) {}
 
 Direct3D12VDPRenderer::~Direct3D12VDPRenderer() {
     m_impl->Shutdown();
@@ -1639,13 +1631,12 @@ util::VoidResult<> Direct3D12VDPRenderer::Initialize(ID3D12Device *device) {
 
 util::ObjectResult<Direct3D12VDPRenderer>
 Direct3D12VDPRenderer::Create(VDPState &state, const config::VDP2DebugRender &vdp2DebugRenderOptions,
-                              const config::VDP2AccessPatternsConfig &vdp2AccessPatternsConfig,
-                              core::Configuration::HardwareRenderer &hwRenderConfig, ID3D12Device *device) {
+                              const config::VDP2AccessPatternsConfig &vdp2AccessPatternsConfig, ID3D12Device *device) {
     if (device == nullptr) {
         return util::ErrorMessage{"No Direct3D 12 device instance provided"};
     }
     std::unique_ptr<Direct3D12VDPRenderer> renderer{
-        new Direct3D12VDPRenderer(state, vdp2DebugRenderOptions, vdp2AccessPatternsConfig, hwRenderConfig)};
+        new Direct3D12VDPRenderer(state, vdp2DebugRenderOptions, vdp2AccessPatternsConfig)};
     util::VoidResult<> result = renderer->Initialize(device);
     if (!result) {
         return result.Error();
