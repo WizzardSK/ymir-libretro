@@ -31,7 +31,7 @@ If you get the "fatal error" popup, you encountered a critical bug in the applic
 
 Follow these steps to collect and share a minidump:
 1. Download ProcDump: https://learn.microsoft.com/en-us/sysinternals/downloads/procdump.
-2. Open a Command Prompt window (cmd.exe) and run `procdump ymir-sdl3.exe`.
+2. Open a Command Prompt window (cmd.exe), navigate to the folder where you downloaded ProcDump (`cd <path-to-folder>`) and run `procdump ymir-sdl3.exe`.
 3. Open the folder from which you ran the command (you can run `start .` from the Command Prompt to open an Explorer window on that directory). There should be a file named `ymir-sdl3.exe_<date>_<time>.dmp`. Compress that and share it. This file contains a minimal dump of the program which can be used by developers to figure out where exactly the emulator crashed.
    - For developers: the PDBs can be found attached to the [nightly release workflow](https://github.com/ymir-emu/Ymir/actions/workflows/nightly-release.yaml).
 
