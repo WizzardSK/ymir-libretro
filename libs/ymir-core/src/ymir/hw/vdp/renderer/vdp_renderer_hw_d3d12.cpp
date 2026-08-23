@@ -616,7 +616,7 @@ struct Direct3D12VDPRenderer::Impl {
         /// @brief VRAM data buffer.
         D3D12Resource vramBuffer;
         /// @brief VRAM data buffer SRV.
-        Descriptor vramSRV;
+        DescriptorRange vramSRV;
 
         /// @brief Bit shift for the granularity for VRAM dirty bitmap chunks.
         static constexpr size_t kVRAMDirtyBitmapChunkSizeShift = 8;
@@ -643,14 +643,14 @@ struct Direct3D12VDPRenderer::Impl {
         /// @brief CRAM color buffer.
         D3D12Resource cramColorBuffer;
         /// @brief CRAM color buffer SRV.
-        Descriptor cramColorSRV;
+        DescriptorRange cramColorSRV;
         /// @brief CPU-side CRAM color buffer.
         CRAMColorCache cpuCRAMColorCache;
 
         /// @brief Raw CRAM rotation coefficients buffer.
         D3D12Resource cramRotCoeffBuffer;
         /// @brief Raw CRAM rotation coefficients buffer SRV.
-        Descriptor cramRotCoeffSRV;
+        DescriptorRange cramRotCoeffSRV;
 
         /// @brief VDP2 CRAM dirty flag.
         bool cramDirty;
@@ -659,22 +659,22 @@ struct Direct3D12VDPRenderer::Impl {
         /// Contains the intermediate per-layer outputs of the VDP2 rendering process.
         D3D12Resource layerOutTexture;
         /// @brief Layer outputs SRV.
-        Descriptor layerOutSRV;
+        DescriptorRange layerOutSRV;
         /// @brief Layer outputs UAV.
-        Descriptor layerOutUAV;
+        DescriptorRange layerOutUAV;
 
         /// @brief LNCL/BACK screen texture.
         /// 2D texture with X=0->LNCL, X=1->BACK, and Y being each scanline.
         D3D12Resource lnclBackTexture;
         /// @brief LNCL/BACK screen texture SRV.
-        Descriptor lnclBackSRV;
+        DescriptorRange lnclBackSRV;
         /// @brief CPU-side LNCL/BACK screen texture (0,y=LNCL; 1,y=BACK).
         std::array<std::array<ColorR8G8B8A8, 2>, kMaxResV> cpuLnclBack;
 
         /// @brief VDP2 rotation parameter base values buffer.
         D3D12Resource rotParamBasesBuffer;
         /// @brief VDP2 rotation parameter base values buffer SRV.
-        Descriptor rotParamBasesSRV;
+        DescriptorRange rotParamBasesSRV;
         /// @brief CPU-side VDP2 rotation parameter base values.
         std::array<VDP2RotParamBase, kMaxNormalResV * 2> cpuRotParamBases;
 
