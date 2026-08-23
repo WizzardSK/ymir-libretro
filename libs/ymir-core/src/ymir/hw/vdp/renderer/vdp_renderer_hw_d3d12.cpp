@@ -307,6 +307,114 @@ D3D12_SHADER_BYTECODE ToShaderBytecode(const gpu::CompiledShader<stage> &shader)
     };
 }
 
+/// @brief Manages a set of buffer transition barriers and emits them to command lists.
+struct BufferTransitionBarrierSet {
+    BufferTransitionBarrierSet(bool enhancedBarriers)
+        : m_enhancedBarriers(enhancedBarriers) {}
+
+    /// @brief Adds a barrier to this set.
+    ///
+    /// `sync*` and `access*` parameters are used with enhanced barriers, while `state*` parameters are used with legacy
+    /// barriers.
+    ///
+    /// @param[in] buffer pointer to the buffer resource
+    /// @param[in] size size of the buffer
+    /// @param[in] syncBefore synchronization scope of all preceding GPU work that must be completed before executing
+    /// the barrier
+    /// @param[in] syncAfter synchronization scope of all subsequent GPU work that must wait until the barrier execution
+    /// is finished
+    /// @param[in] accessBefore access bits corresponding with resource usage since the preceding barrier, or the start
+    /// of ExecuteCommandLists scope
+    /// @param[in] accessAfter access bits corresponding with resource usage after the barrier completes
+    /// @param[in] stateBefore usage bits before the resource is transitioned
+    /// @param[in] stateAfter usage bits after the resource is transitioned
+    /// @return this barrier set
+    BufferTransitionBarrierSet &Add(ID3D12Resource *buffer, UINT64 size, D3D12_BARRIER_SYNC syncBefore,
+                                    D3D12_BARRIER_SYNC syncAfter, D3D12_BARRIER_ACCESS accessBefore,
+                                    D3D12_BARRIER_ACCESS accessAfter, D3D12_RESOURCE_STATES stateBefore,
+                                    D3D12_RESOURCE_STATES stateAfter) {
+        m_entries.push_back({buffer, size, syncBefore, syncAfter, accessBefore, accessAfter, stateBefore, stateAfter});
+        return *this;
+    }
+
+    /// @brief Reverses the transition parameters of all barriers registered in this set.
+    /// @return this barrier set
+    BufferTransitionBarrierSet &Reverse() {
+        for (Entry &entry : m_entries) {
+            std::swap(entry.syncBefore, entry.syncAfter);
+            std::swap(entry.accessBefore, entry.accessAfter);
+            std::swap(entry.stateBefore, entry.stateAfter);
+        }
+        return *this;
+    }
+
+    /// @brief Emits a barrier command into the command list using legacy or enhanced barriers.
+    /// @param[in] cmdList the command list
+    void Emit(D3D12GraphicsCommandList &cmdList) {
+        if (auto *enhCmdList = GetCommandListForEnhancedBarriers(cmdList)) {
+            std::vector<D3D12_BUFFER_BARRIER> barriers{m_entries.size()};
+            for (size_t i = 0; i < m_entries.size(); ++i) {
+                const Entry &entry = m_entries[i];
+                barriers[i] = {
+                    .SyncBefore = entry.syncBefore,
+                    .SyncAfter = entry.syncAfter,
+                    .AccessBefore = entry.accessBefore,
+                    .AccessAfter = entry.accessAfter,
+                    .pResource = entry.buffer,
+                    .Offset = 0,
+                    .Size = entry.size,
+                };
+            }
+            const D3D12_BARRIER_GROUP group{
+                .Type = D3D12_BARRIER_TYPE_BUFFER,
+                .NumBarriers = static_cast<UINT32>(barriers.size()),
+                .pBufferBarriers = barriers.data(),
+            };
+            enhCmdList->Barrier(1, &group);
+        } else {
+            std::vector<D3D12_RESOURCE_BARRIER> barriers{m_entries.size()};
+            for (size_t i = 0; i < m_entries.size(); ++i) {
+                const Entry &entry = m_entries[i];
+                barriers[i] = {
+                    .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                    .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                    .Transition =
+                        {
+                            .pResource = entry.buffer,
+                            .Subresource = 0,
+                            .StateBefore = entry.stateBefore,
+                            .StateAfter = entry.stateAfter,
+                        },
+                };
+            }
+            cmdList->ResourceBarrier(barriers.size(), barriers.data());
+        }
+    }
+
+private:
+    struct Entry {
+        ID3D12Resource *buffer;
+        UINT64 size;
+        D3D12_BARRIER_SYNC syncBefore;
+        D3D12_BARRIER_SYNC syncAfter;
+        D3D12_BARRIER_ACCESS accessBefore;
+        D3D12_BARRIER_ACCESS accessAfter;
+        D3D12_RESOURCE_STATES stateBefore;
+        D3D12_RESOURCE_STATES stateAfter;
+    };
+    std::vector<Entry> m_entries;
+    bool m_enhancedBarriers;
+
+    /// @brief Retrieves a pointer to the specified command list if enhanced barriers are supported.
+    /// @param[in] cmdList the command list
+    /// @param[in] enhancedBarriers whether enhanced barriers are supported
+    /// @return a pointer to the command list converted to `ID3D12GraphicsCommandList7` for enhanced barriers
+    /// operations, or `nullptr` if the feature is not supported by the device
+    ID3D12GraphicsCommandList7 *GetCommandListForEnhancedBarriers(D3D12GraphicsCommandList &cmdList) const {
+        return m_enhancedBarriers ? cmdList.As7() : nullptr;
+    }
+};
+
 // ---------------------------------------------------------------------------------------------------------------------
 
 struct Direct3D12VDPRenderer::Impl {
@@ -892,17 +1000,6 @@ struct Direct3D12VDPRenderer::Impl {
         return std::vector<char>{file.begin(), file.end()};
     }
 
-    /// @brief Retrieves a pointer to the specified command list if enhanced barriers are supported.
-    /// @param[in] cmdList the command list
-    /// @return a pointer to the command list converted to `ID3D12GraphicsCommandList7` for enhanced barriers
-    /// operations, or `nullptr` if the feature is not supported by the device
-    ID3D12GraphicsCommandList7 *GetCommandListForEnhancedBarriers(D3D12GraphicsCommandList &cmdList) const {
-        if (!features.enhancedBarriers) {
-            return nullptr;
-        }
-        return cmdList.As7();
-    }
-
     // -----------------------------------------------------------------------------------------------------------------
     // State
 
@@ -1126,38 +1223,11 @@ struct Direct3D12VDPRenderer::Impl {
 
         ID3D12Resource *uploadBufferPtr = vdp2.uploadBuffer.GetBufferResource().GetPointer();
 
-        // Indicate that the VDP2 VRAM buffer will be used as copy destination
-        // TODO: refactor barriers to a convenience class to reduce boilerplate
-        if (auto *enhCmdList = GetCommandListForEnhancedBarriers(vdp2.cmdList)) {
-            D3D12_BUFFER_BARRIER barrier{
-                .SyncBefore = D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                .SyncAfter = D3D12_BARRIER_SYNC_COPY,
-                .AccessBefore = D3D12_BARRIER_ACCESS_COMMON,
-                .AccessAfter = D3D12_BARRIER_ACCESS_COPY_DEST,
-                .pResource = uploadBufferPtr,
-                .Offset = 0,
-                .Size = vdp2.uploadBuffer.GetSize(),
-            };
-            const D3D12_BARRIER_GROUP group{
-                .Type = D3D12_BARRIER_TYPE_BUFFER,
-                .NumBarriers = 1,
-                .pBufferBarriers = &barrier,
-            };
-            enhCmdList->Barrier(1, &group);
-        } else {
-            D3D12_RESOURCE_BARRIER barrier{
-                .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-                .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
-                .Transition =
-                    {
-                        .pResource = uploadBufferPtr,
-                        .Subresource = 0,
-                        .StateBefore = D3D12_RESOURCE_STATE_COMMON,
-                        .StateAfter = D3D12_RESOURCE_STATE_COPY_DEST,
-                    },
-            };
-            vdp2.cmdList->ResourceBarrier(1, &barrier);
-        }
+        BufferTransitionBarrierSet barrier{features.enhancedBarriers};
+        barrier.Add(uploadBufferPtr, vdp2.uploadBuffer.GetSize(), D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                    D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_ACCESS_COPY_DEST,
+                    D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+        barrier.Emit(vdp2.cmdList);
 
         // Upload all modified VRAM chunks
         size_t pos, count = 0;
@@ -1180,37 +1250,7 @@ struct Direct3D12VDPRenderer::Impl {
 
         vdp2.vramDirty.ClearAll();
 
-        // Indicate that the VDP2 VRAM buffer will be used with compute shaders
-        if (auto *enhCmdList = GetCommandListForEnhancedBarriers(vdp2.cmdList)) {
-            D3D12_BUFFER_BARRIER barrier{
-                .SyncBefore = D3D12_BARRIER_SYNC_COPY,
-                .SyncAfter = D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                .AccessBefore = D3D12_BARRIER_ACCESS_COPY_DEST,
-                .AccessAfter = D3D12_BARRIER_ACCESS_COMMON,
-                .pResource = uploadBufferPtr,
-                .Offset = 0,
-                .Size = vdp2.uploadBuffer.GetSize(),
-            };
-            const D3D12_BARRIER_GROUP group{
-                .Type = D3D12_BARRIER_TYPE_BUFFER,
-                .NumBarriers = 1,
-                .pBufferBarriers = &barrier,
-            };
-            enhCmdList->Barrier(1, &group);
-        } else {
-            D3D12_RESOURCE_BARRIER barrier{
-                .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-                .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
-                .Transition =
-                    {
-                        .pResource = uploadBufferPtr,
-                        .Subresource = 0,
-                        .StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
-                        .StateAfter = D3D12_RESOURCE_STATE_COMMON,
-                    },
-            };
-            vdp2.cmdList->ResourceBarrier(1, &barrier);
-        }
+        barrier.Reverse().Emit(vdp2.cmdList);
 
         return {};
     }
@@ -1227,6 +1267,12 @@ struct Direct3D12VDPRenderer::Impl {
         ID3D12Resource *uploadBufferPtr = vdp2.uploadBuffer.GetBufferResource().GetPointer();
         UploadAllocation alloc{};
 
+        BufferTransitionBarrierSet barrier{features.enhancedBarriers};
+        barrier.Add(uploadBufferPtr, vdp2.uploadBuffer.GetSize(), D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                    D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_ACCESS_COPY_DEST,
+                    D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+        barrier.Emit(vdp2.cmdList);
+
         // ---------------------------------------------------------------------
         // Update color cache
 
@@ -1238,69 +1284,8 @@ struct Direct3D12VDPRenderer::Impl {
             }
             memcpy(alloc.data, vdp2.cpuCRAMColorCache.data(), size);
 
-            if (auto *enhCmdList = GetCommandListForEnhancedBarriers(vdp2.cmdList)) {
-                D3D12_BUFFER_BARRIER barrier{
-                    .SyncBefore = D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    .SyncAfter = D3D12_BARRIER_SYNC_COPY,
-                    .AccessBefore = D3D12_BARRIER_ACCESS_COMMON,
-                    .AccessAfter = D3D12_BARRIER_ACCESS_COPY_DEST,
-                    .pResource = uploadBufferPtr,
-                    .Offset = 0,
-                    .Size = vdp2.uploadBuffer.GetSize(),
-                };
-                const D3D12_BARRIER_GROUP group{
-                    .Type = D3D12_BARRIER_TYPE_BUFFER,
-                    .NumBarriers = 1,
-                    .pBufferBarriers = &barrier,
-                };
-                enhCmdList->Barrier(1, &group);
-            } else {
-                D3D12_RESOURCE_BARRIER barrier{
-                    .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-                    .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
-                    .Transition =
-                        {
-                            .pResource = uploadBufferPtr,
-                            .Subresource = 0,
-                            .StateBefore = D3D12_RESOURCE_STATE_COMMON,
-                            .StateAfter = D3D12_RESOURCE_STATE_COPY_DEST,
-                        },
-                };
-                vdp2.cmdList->ResourceBarrier(1, &barrier);
-            }
-
-            vdp2.cmdList->CopyBufferRegion(vdp2.cramColorBuffer.GetPointer(), 0, uploadBufferPtr, alloc.offset, size);
-
-            if (auto *enhCmdList = GetCommandListForEnhancedBarriers(vdp2.cmdList)) {
-                D3D12_BUFFER_BARRIER barrier{
-                    .SyncBefore = D3D12_BARRIER_SYNC_COPY,
-                    .SyncAfter = D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    .AccessBefore = D3D12_BARRIER_ACCESS_COPY_DEST,
-                    .AccessAfter = D3D12_BARRIER_ACCESS_COMMON,
-                    .pResource = uploadBufferPtr,
-                    .Offset = 0,
-                    .Size = vdp2.uploadBuffer.GetSize(),
-                };
-                const D3D12_BARRIER_GROUP group{
-                    .Type = D3D12_BARRIER_TYPE_BUFFER,
-                    .NumBarriers = 1,
-                    .pBufferBarriers = &barrier,
-                };
-                enhCmdList->Barrier(1, &group);
-            } else {
-                D3D12_RESOURCE_BARRIER barrier{
-                    .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-                    .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
-                    .Transition =
-                        {
-                            .pResource = uploadBufferPtr,
-                            .Subresource = 0,
-                            .StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
-                            .StateAfter = D3D12_RESOURCE_STATE_COMMON,
-                        },
-                };
-                vdp2.cmdList->ResourceBarrier(1, &barrier);
-            }
+            ID3D12Resource *dstResource = vdp2.cramColorBuffer.GetPointer();
+            vdp2.cmdList->CopyBufferRegion(dstResource, 0, uploadBufferPtr, alloc.offset, size);
         }
 
         // ---------------------------------------------------------------------
@@ -1316,71 +1301,11 @@ struct Direct3D12VDPRenderer::Impl {
             }
             memcpy(alloc.data, &vdpState.mem2.CRAM[kVDP2CRAMSize / 2], size);
 
-            if (auto *enhCmdList = GetCommandListForEnhancedBarriers(vdp2.cmdList)) {
-                D3D12_BUFFER_BARRIER barrier{
-                    .SyncBefore = D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    .SyncAfter = D3D12_BARRIER_SYNC_COPY,
-                    .AccessBefore = D3D12_BARRIER_ACCESS_COMMON,
-                    .AccessAfter = D3D12_BARRIER_ACCESS_COPY_DEST,
-                    .pResource = uploadBufferPtr,
-                    .Offset = 0,
-                    .Size = vdp2.uploadBuffer.GetSize(),
-                };
-                const D3D12_BARRIER_GROUP group{
-                    .Type = D3D12_BARRIER_TYPE_BUFFER,
-                    .NumBarriers = 1,
-                    .pBufferBarriers = &barrier,
-                };
-                enhCmdList->Barrier(1, &group);
-            } else {
-                D3D12_RESOURCE_BARRIER barrier{
-                    .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-                    .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
-                    .Transition =
-                        {
-                            .pResource = uploadBufferPtr,
-                            .Subresource = 0,
-                            .StateBefore = D3D12_RESOURCE_STATE_COMMON,
-                            .StateAfter = D3D12_RESOURCE_STATE_COPY_DEST,
-                        },
-                };
-                vdp2.cmdList->ResourceBarrier(1, &barrier);
-            }
-
-            vdp2.cmdList->CopyBufferRegion(vdp2.cramRotCoeffBuffer.GetPointer(), 0, uploadBufferPtr, alloc.offset,
-                                           size);
-
-            if (auto *enhCmdList = GetCommandListForEnhancedBarriers(vdp2.cmdList)) {
-                D3D12_BUFFER_BARRIER barrier{
-                    .SyncBefore = D3D12_BARRIER_SYNC_COPY,
-                    .SyncAfter = D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    .AccessBefore = D3D12_BARRIER_ACCESS_COPY_DEST,
-                    .AccessAfter = D3D12_BARRIER_ACCESS_COMMON,
-                    .pResource = uploadBufferPtr,
-                    .Offset = 0,
-                    .Size = vdp2.uploadBuffer.GetSize(),
-                };
-                const D3D12_BARRIER_GROUP group{
-                    .Type = D3D12_BARRIER_TYPE_BUFFER,
-                    .NumBarriers = 1,
-                    .pBufferBarriers = &barrier,
-                };
-                enhCmdList->Barrier(1, &group);
-            } else {
-                D3D12_RESOURCE_BARRIER barrier{
-                    .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-                    .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
-                    .Transition =
-                        {
-                            .pResource = uploadBufferPtr,
-                            .Subresource = 0,
-                            .StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
-                            .StateAfter = D3D12_RESOURCE_STATE_COMMON,
-                        },
-                };
-                vdp2.cmdList->ResourceBarrier(1, &barrier);
-            }
+            ID3D12Resource *dstResource = vdp2.cramRotCoeffBuffer.GetPointer();
+            vdp2.cmdList->CopyBufferRegion(dstResource, 0, uploadBufferPtr, alloc.offset, size);
         }
+
+        barrier.Reverse().Emit(vdp2.cmdList);
 
         return {};
     }
