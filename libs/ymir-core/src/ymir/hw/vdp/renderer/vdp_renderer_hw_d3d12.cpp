@@ -27,7 +27,6 @@ CMRC_DECLARE(ymir_core_shaders);
 
 #include <concepts>
 #include <deque>
-#include <unordered_map>
 #include <vector>
 
 using namespace ymir::gpu::d3d12;
@@ -43,6 +42,7 @@ namespace grp {
     // Hierarchy:
     //
     // dx12_base
+    //   dx12_upload
     //   dx12_vdp1
     //   dx12_vdp2
 
@@ -50,6 +50,11 @@ namespace grp {
         static constexpr bool enabled = true;
         static constexpr devlog::Level level = devlog::level::debug;
         static constexpr std::string_view name = "VDP-DX12";
+    };
+
+    struct dx12_upload : public dx12_base {
+        // static constexpr devlog::Level level = devlog::level::trace;
+        static constexpr std::string_view name = "VDP-DX12-Upload";
     };
 
     struct dx12_vdp1 : public dx12_base {
@@ -165,6 +170,12 @@ public:
         return m_size;
     }
 
+    /// @brief Sets a debug name for this buffer.
+    /// @param[in] name the new debug name
+    void SetDebugName(std::string_view name) {
+        m_debugName = name;
+    }
+
     /// @brief Attempts to allocate a chunk of memory from the upload buffer.
     /// @param[in] size the requested size
     /// @param[in] alignment the requested alignment
@@ -174,21 +185,21 @@ public:
     bool Allocate(size_t size, size_t alignment, UINT64 completedFenceValue, UploadAllocation &outAlloc) {
         ReclaimCompletedChunks(completedFenceValue);
 
-        // Check if there's enough contiguous space of the requested size starting from the aligned head position
+        // Check if there's enough contiguous space of the requested size starting from the aligned head position.
+        // The head may be readjusted to the beginning of the upload buffer if there is not enough room at the end of
+        // the buffer.
         size_t alignedHead = Align(m_head, alignment);
-        if (!HasContiguousSpace(alignedHead, size)) {
-            // Not enough room at the end of the buffer.
-            // Try wrapping back to the start.
-            alignedHead = 0;
-            if (!HasContiguousSpace(alignedHead, size)) {
-                return false;
-            }
+        if (!HasContiguousSpace(alignedHead, size, m_tail, &alignedHead)) {
+            return false;
         }
 
         // Successfully allocated a chunk
         outAlloc.offset = alignedHead;
         outAlloc.data = static_cast<void *>(m_basePtr + alignedHead);
         outAlloc.size = size;
+        devlog::trace<grp::dx12_upload>("[{}] Allocated {:X}..{:X}, fence {} / {}", m_debugName, outAlloc.offset,
+                                        outAlloc.offset + outAlloc.size, completedFenceValue,
+                                        m_lastSubmittedFenceValue);
 
         // Update head position; wrap back to zero if needed
         m_head = alignedHead + size;
@@ -199,12 +210,44 @@ public:
         return true;
     }
 
+    /// @brief Finds the fence value to wait for which will have enough space for the requested allocation.
+    /// @param[in] size the requested size
+    /// @param[in] alignment the requested alignment
+    /// @return the minimum fence number to wait for which frees up enough space for the requested allocation
+    UINT64 FindFenceValueForAllocation(size_t size, size_t alignment) {
+        // Common early bail-outs:
+        // - there's already enough room for the buffer, so there's no need to wait
+        // - the chunk list is empty
+        const size_t alignedHead = Align(m_head, alignment);
+        if (HasContiguousSpace(alignedHead, size, m_tail)) {
+            return m_lastCompletedFenceValue;
+        }
+        if (m_chunks.empty()) {
+            return m_lastSubmittedFenceValue;
+        }
+
+        size_t queuePos = 0;
+        size_t tail = m_tail;
+        UINT64 fenceValue = m_lastCompletedFenceValue;
+        do {
+            if (HasContiguousSpace(alignedHead, size, tail)) {
+                return fenceValue;
+            }
+            tail = m_chunks[queuePos].endOffset;
+            fenceValue = m_chunks[queuePos].fenceValue;
+            ++queuePos;
+        } while (queuePos < m_chunks.size());
+        return m_lastSubmittedFenceValue;
+    }
+
     /// @brief Records the end of a frame.
-    /// @param[in] frameFenceValue the frame's fence value
-    void EndFrame(UINT64 frameFenceValue) {
+    /// @param[in] fenceValue the frame's fence value
+    void EndFrame(UINT64 fenceValue) {
         UploadFrameChunk &chunk = m_chunks.emplace_back();
         chunk.endOffset = m_head;
-        chunk.fenceValue = frameFenceValue;
+        chunk.fenceValue = fenceValue;
+        devlog::trace<grp::dx12_upload>("[{}] Frame ended, fence {}", m_debugName, fenceValue);
+        m_lastSubmittedFenceValue = std::max(m_lastSubmittedFenceValue, fenceValue);
     }
 
 private:
@@ -214,31 +257,45 @@ private:
     size_t m_head = 0;
     size_t m_tail = 0;
     std::deque<UploadFrameChunk> m_chunks;
+    UINT64 m_lastSubmittedFenceValue = 0;
+    UINT64 m_lastCompletedFenceValue = 0;
+    std::string m_debugName;
 
     /// @brief Reclaims allocated chunks from previously completed frames.
-    /// @param[in] completedFenceValue the latest completed fence value
-    void ReclaimCompletedChunks(UINT64 completedFenceValue) {
-        while (!m_chunks.empty() && m_chunks.front().fenceValue <= completedFenceValue) {
+    /// @param[in] fenceValue the latest completed fence value
+    void ReclaimCompletedChunks(UINT64 fenceValue) {
+        while (!m_chunks.empty() && m_chunks.front().fenceValue <= fenceValue) {
             m_tail = m_chunks.front().endOffset;
+            devlog::trace<grp::dx12_upload>("[{}] Reclaimed fence {}, tail={:X}", m_debugName,
+                                            m_chunks.front().fenceValue, m_tail);
             m_chunks.pop_front();
         }
+        m_lastCompletedFenceValue = std::max(m_lastCompletedFenceValue, fenceValue);
     }
 
     /// @brief Checks if there's enough free contiguous space from a starting point.
     /// @param[in] start the starting offset
     /// @param[in] size the requested allocation size
+    /// @param[in] tail the allocation tail
+    /// @param[out] outStart if specified, receives the updated start offset, either the provided start offset or zero
     /// @return `true` if the buffer has enough space in the specified area, `false` if not
-    bool HasContiguousSpace(size_t start, size_t size) const {
-        if (m_tail <= start) {
-            // Free region is [start, m_size) and [0, m_tail)
+    bool HasContiguousSpace(size_t start, size_t size, size_t tail, size_t *outStart = nullptr) const {
+        if (outStart != nullptr) {
+            *outStart = start;
+        }
+        if (tail <= start) {
+            // Free region is [start, m_size) and [0, tail)
             size_t beforeWrap = m_size - start;
             if (size <= beforeWrap) {
                 return true;
             }
-            return size <= m_tail;
+            if (outStart != nullptr) {
+                *outStart = 0;
+            }
+            return size <= tail;
         } else {
-            // Free region is [start, m_tail)
-            return (start + size) <= m_tail;
+            // Free region is [start, tail)
+            return (start + size) <= tail;
         }
     }
 
@@ -635,6 +692,7 @@ struct Direct3D12VDPRenderer::Impl {
                 return util::ErrorMessage{
                     fmt::format("Could not create VDP2 upload buffer: {}", result.Error().message)};
             }
+            vdp2.uploadBuffer.SetDebugName("VDP2");
             vdp2.uploadBuffer.GetBufferResource()->SetName(L"[Ymir-VDP2] Upload buffer");
         }
 
@@ -1066,7 +1124,7 @@ struct Direct3D12VDPRenderer::Impl {
         if (!vdp2.uploadBuffer.Allocate(size, alignment, fence.GetCompletedValue(), outAlloc)) {
             // Block until next fence completes and retry
             // TODO: find ideal fence value to wait for based on requested size+alignment
-            const UINT64 waitValue = vdp2.frames.currFenceValue;
+            const UINT64 waitValue = vdp2.uploadBuffer.FindFenceValueForAllocation(size, alignment);
             fence.Wait(INFINITE, waitValue);
 
             // At this point, we really should be able to allocate the buffer
