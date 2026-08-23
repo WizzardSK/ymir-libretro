@@ -655,22 +655,26 @@ struct Direct3D12VDPRenderer::Impl {
         /// @brief VDP2 CRAM dirty flag.
         bool cramDirty;
 
-        // LayerOut contains the intermediate per-layer outputs of the VDP2 rendering process.
-
         /// @brief 2D texture array for the outputs of NBG0-3, RBG0-1, sprite and mesh layers (in that order).
+        /// Contains the intermediate per-layer outputs of the VDP2 rendering process.
         D3D12Resource layerOutTexture;
         /// @brief Layer outputs SRV.
         Descriptor layerOutSRV;
         /// @brief Layer outputs UAV.
         Descriptor layerOutUAV;
 
-        // TODO: LNCL/BACK screen texture + upload buffer
-
+        /// @brief LNCL/BACK screen texture.
+        /// 2D texture with X=0->LNCL, X=1->BACK, and Y being each scanline.
+        D3D12Resource lnclBackTexture;
+        /// @brief LNCL/BACK screen texture SRV.
+        Descriptor lnclBackSRV;
         /// @brief CPU-side LNCL/BACK screen texture (0,y=LNCL; 1,y=BACK).
-        std::array<std::array<ColorR8G8B8A8, 2>, kMaxResV> cpuLineColors;
+        std::array<std::array<ColorR8G8B8A8, 2>, kMaxResV> cpuLnclBack;
 
-        // TODO: Rotation parameter base values structured buffer array (2 entries, A and B)
-
+        /// @brief VDP2 rotation parameter base values buffer.
+        D3D12Resource rotParamBasesBuffer;
+        /// @brief VDP2 rotation parameter base values buffer SRV.
+        Descriptor rotParamBasesSRV;
         /// @brief CPU-side VDP2 rotation parameter base values.
         std::array<VDP2RotParamBase, kMaxNormalResV * 2> cpuRotParamBases;
 
@@ -899,7 +903,7 @@ struct Direct3D12VDPRenderer::Impl {
                 return util::ErrorMessage{
                     fmt::format("Could not create layer outputs texture array, error code {:X}", (uint32)hr)};
             }
-            vdp2.layerOutTexture->SetName(L"[Ymir-VDP2] Layer outputs array");
+            vdp2.layerOutTexture->SetName(L"[Ymir-VDP2] Layer outputs texture array");
 
             if (!resourceHeapAlloc.Allocate(vdp2.layerOutSRV)) {
                 return util::ErrorMessage{"Could not allocate layer outputs texture array SRV"};
@@ -936,6 +940,64 @@ struct Direct3D12VDPRenderer::Impl {
             };
             device->CreateUnorderedAccessView(vdp2.layerOutTexture.GetPointer(), nullptr, &uavDesc,
                                               vdp2.layerOutUAV.cpuHandle);
+        }
+
+        // LNCL/BACK screen texture
+        {
+            static constexpr DXGI_FORMAT kFormat = DXGI_FORMAT_R8G8B8A8_UINT;
+
+            auto builder = vdp2.lnclBackTexture.Texture2DBuilder(2, vdp::kMaxNormalResV);
+            builder.Format(kFormat);
+            if (HRESULT hr = builder.BuildCommitted(device); FAILED(hr)) {
+                return util::ErrorMessage{
+                    fmt::format("Could not create LNCL/BACK screen texture, error code {:X}", (uint32)hr)};
+            }
+            vdp2.lnclBackTexture->SetName(L"[Ymir-VDP2] LNCL/BACK screen texture");
+
+            if (!resourceHeapAlloc.Allocate(vdp2.lnclBackSRV)) {
+                return util::ErrorMessage{"Could not allocate LNCL/BACK screen texture SRV"};
+            }
+            const D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{
+                .Format = kFormat,
+                .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D,
+                .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                .Texture2D =
+                    {
+                        .MostDetailedMip = 0,
+                        .MipLevels = 1,
+                        .PlaneSlice = 0,
+                        .ResourceMinLODClamp = 0.0f,
+                    },
+            };
+            device->CreateShaderResourceView(vdp2.lnclBackTexture.GetPointer(), &srvDesc, vdp2.lnclBackSRV.cpuHandle);
+        }
+
+        // VDP2 rotation parameter base values buffer
+        {
+            auto builder = vdp2.rotParamBasesBuffer.BufferBuilder(sizeof(vdp2.cpuRotParamBases));
+            if (HRESULT hr = builder.BuildCommitted(device); FAILED(hr)) {
+                return util::ErrorMessage{fmt::format(
+                    "Could not create VDP2 rotation parameter base values buffer, error code {:X}", (uint32)hr)};
+            }
+            vdp2.rotParamBasesBuffer->SetName(L"[Ymir-VDP2] Rotation parameter base values buffer");
+
+            if (!resourceHeapAlloc.Allocate(vdp2.rotParamBasesSRV)) {
+                return util::ErrorMessage{"Could not allocate VDP2 rotation parameter base values buffer SRV"};
+            }
+            const D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{
+                .Format = DXGI_FORMAT_UNKNOWN,
+                .ViewDimension = D3D12_SRV_DIMENSION_BUFFER,
+                .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                .Buffer =
+                    {
+                        .FirstElement = 0,
+                        .NumElements = 2,
+                        .StructureByteStride = sizeof(VDP2RotParamBase),
+                        .Flags = D3D12_BUFFER_SRV_FLAG_NONE,
+                    },
+            };
+            device->CreateShaderResourceView(vdp2.rotParamBasesBuffer.GetPointer(), &srvDesc,
+                                             vdp2.rotParamBasesSRV.cpuHandle);
         }
 
         // Draw background layers compute shader, root signature and pipeline state object
@@ -1350,7 +1412,7 @@ struct Direct3D12VDPRenderer::Impl {
             const uint32 lnclY = lineParams.perLine ? y : 0;
             const uint32 address = lineParams.baseAddress + lnclY * sizeof(uint16);
             const uint32 cramAddress = vdpState.mem2.ReadVRAM<uint16>(address);
-            vdp2.cpuLineColors[y][0] = vdp2.cpuCRAMColorCache[cramAddress & 0x7FF];
+            vdp2.cpuLnclBack[y][0] = vdp2.cpuCRAMColorCache[cramAddress & 0x7FF];
         }
 
         // Read back screen color
@@ -1360,10 +1422,10 @@ struct Direct3D12VDPRenderer::Impl {
             const uint32 address = backParams.baseAddress + backY * sizeof(Color555);
             const Color555 color5{.u16 = vdpState.mem2.ReadVRAM<uint16>(address)};
             const Color888 color8 = ConvertRGB555to888(color5);
-            vdp2.cpuLineColors[y][1].r = color8.r;
-            vdp2.cpuLineColors[y][1].g = color8.g;
-            vdp2.cpuLineColors[y][1].b = color8.b;
-            vdp2.cpuLineColors[y][1].a = color8.msb;
+            vdp2.cpuLnclBack[y][1].r = color8.r;
+            vdp2.cpuLnclBack[y][1].g = color8.g;
+            vdp2.cpuLnclBack[y][1].b = color8.b;
+            vdp2.cpuLnclBack[y][1].a = color8.msb;
         }
     }
 
