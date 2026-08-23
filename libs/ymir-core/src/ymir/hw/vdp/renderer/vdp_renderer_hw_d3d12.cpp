@@ -351,6 +351,10 @@ struct BufferTransitionBarrierSet {
     /// @brief Emits a barrier command into the command list using legacy or enhanced barriers.
     /// @param[in] cmdList the command list
     void Emit(D3D12GraphicsCommandList &cmdList) {
+        if (m_entries.empty()) {
+            return;
+        }
+
         if (auto *enhCmdList = GetCommandListForEnhancedBarriers(cmdList)) {
             std::vector<D3D12_BUFFER_BARRIER> barriers{m_entries.size()};
             for (size_t i = 0; i < m_entries.size(); ++i) {
@@ -1247,7 +1251,6 @@ struct Direct3D12VDPRenderer::Impl {
             vdp2.cmdList->CopyBufferRegion(vdp2.vramBuffer.GetPointer(), vramOffset, uploadBufferPtr, alloc.offset,
                                            size);
         }
-
         vdp2.vramDirty.ClearAll();
 
         barrier.Reverse().Emit(vdp2.cmdList);
@@ -1273,9 +1276,7 @@ struct Direct3D12VDPRenderer::Impl {
                     D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
         barrier.Emit(vdp2.cmdList);
 
-        // ---------------------------------------------------------------------
         // Update color cache
-
         {
             const size_t size = sizeof(CRAMColorCache);
             if (auto result = VDP2AllocateUploadBuffer(size, 4, alloc); !result) {
@@ -1288,9 +1289,7 @@ struct Direct3D12VDPRenderer::Impl {
             vdp2.cmdList->CopyBufferRegion(dstResource, 0, uploadBufferPtr, alloc.offset, size);
         }
 
-        // ---------------------------------------------------------------------
         // Update rotation coefficients view
-
         const VDP2Regs &regs2 = vdpState.regs2;
         if ((regs2.bgEnabled[4] || regs2.bgEnabled[5]) && regs2.vramControl.colorRAMCoeffTableEnable) {
             const size_t size = kVDP2CRAMRotCoeffBufferSize;
