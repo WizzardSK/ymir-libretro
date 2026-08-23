@@ -1543,6 +1543,7 @@ struct Direct3D12VDPRenderer::Impl {
 
         // Advance frame
         VDP2FrameContext &currFrame = vdp2.frames.GetCurrentFrame();
+        vdp2.uploadBuffer.EndFrame(vdp2.frames.currFenceValue + 1);
         vdp2.frames.MoveToNextFrame(fence, cmdQueue);
 
         // TODO: clean up upload buffers
