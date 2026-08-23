@@ -22,6 +22,15 @@ struct DescriptorRange {
     D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle;
     UINT baseIndex; // index of first descriptor in heap
     UINT count;     // number of descriptors allocated in this range
+    UINT descSize;  // size of a descriptor
+
+    D3D12_CPU_DESCRIPTOR_HANDLE GetCPUHandle(UINT offset) {
+        return D3D12_CPU_DESCRIPTOR_HANDLE{.ptr = cpuHandle.ptr + offset * descSize};
+    }
+
+    D3D12_GPU_DESCRIPTOR_HANDLE GetGPUHandle(UINT offset) {
+        return D3D12_GPU_DESCRIPTOR_HANDLE{.ptr = gpuHandle.ptr + offset * descSize};
+    }
 };
 
 /// @brief A descriptor allocator that can be bound to a `D3D12DescriptorHeap`.
@@ -82,6 +91,7 @@ public:
                 outDesc.count = count;
                 outDesc.cpuHandle.ptr = m_heap->GetCPUStart().ptr + ptrOffset;
                 outDesc.gpuHandle.ptr = m_heap->GetGPUStart().ptr + ptrOffset;
+                outDesc.descSize = m_heap->GetDescriptorSize();
 
                 // Adjust free range start and length
                 it->start += count;
