@@ -1604,10 +1604,6 @@ struct Direct3D12VDPRenderer::Impl {
         vdp2.uploadBuffer.EndFrame(vdp2.frames.currFenceValue + 1);
         vdp2.frames.MoveToNextFrame(fence, cmdQueue);
 
-        // TODO: clean up upload buffers
-        // vdp2.uploadBuffer.Free(currFrame.fenceValue);
-        // TODO: free overflow buffers
-
         // Setup command list
         VDP2FrameContext &nextFrame = vdp2.frames.GetCurrentFrame();
         ID3D12DescriptorHeap *heaps[] = {resourceHeap.GetPointer()};
