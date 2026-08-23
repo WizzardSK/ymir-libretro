@@ -95,22 +95,6 @@ static_assert(sizeof(VDP2RotParamBase) == sizeof(uint32) * 4);
 /// @brief Maximum number of frames in flight.
 static constexpr size_t kNumFrames = 4;
 
-// TODO: rewrite upload buffer
-// - implement a ring buffer
-// - track allocations per fence
-// - allocate a large buffer for all uploads (16-32 MB)
-// - dynamically allocate overflow buffers when needed
-//   - dynamic sizes, smaller than the main buffer but larger than the requested allocation
-//   - clean these up once their fence value is reached
-//   - probably a good idea to put these buffers in the frames queue
-//   - dev-log when these allocations happen so we can adjust the buffer size if frequently hitting limits
-// - allocations must take an alignment
-//   - 256 bytes for constant buffers - D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT
-//   - 512 bytes for texture data
-//   - 16 bytes for everything else (might be able to get away with 4 bytes also)
-// - "release" portions of the ring buffer as frames complete
-// https://learn.microsoft.com/en-us/windows/win32/direct3d12/fence-based-resource-management
-
 /// @brief Size of the upload buffers, in bytes.
 /// Should be large enough to fit multiple worst case single transfers, but not waste space needlessly.
 static constexpr UINT64 kUploadBufferSize = 16 * 1024 * 1024;
@@ -930,11 +914,6 @@ struct Direct3D12VDPRenderer::Impl {
         vdp2.rotRegsDirty = true;
         vdp2.bgRenderParamsDirty = true;
         vdp2.composeParamsDirty = true;
-        // TODO: do not reset like this! previous frames might still be in flight
-        // vdp2.uploadBuffer.Reset();
-        // for (UploadBuffer &buffer : vdp2.uploadOverflowBuffers) {
-        //     buffer.Reset();
-        // }
         VDP2UpdateEnabledLayers();
     }
 
@@ -1123,7 +1102,6 @@ struct Direct3D12VDPRenderer::Impl {
 
         if (!vdp2.uploadBuffer.Allocate(size, alignment, fence.GetCompletedValue(), outAlloc)) {
             // Block until next fence completes and retry
-            // TODO: find ideal fence value to wait for based on requested size+alignment
             const UINT64 waitValue = vdp2.uploadBuffer.FindFenceValueForAllocation(size, alignment);
             fence.Wait(INFINITE, waitValue);
 
