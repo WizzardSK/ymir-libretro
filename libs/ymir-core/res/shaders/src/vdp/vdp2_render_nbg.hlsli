@@ -8,21 +8,19 @@
 #include "util/bit_ops.hlsli"
 #include "util/data_ops.hlsli"
 
-uint4 DrawNBG(uint2 pos,  // pixel coordinates
+uint4 DrawNBG(uint2 pos, // pixel coordinates
               uint index, // NBG index (0 to 3)
               ByteAddressBuffer vram,
               Buffer<uint4> cramColor,
               StructuredBuffer<LayerRenderParams> layerParams) {
     NBGParams params = layerParams[0].nbg[index];
-    if (params.base.enabled) {
-        return uint4(255, 255, 255, 255);
-    }
-    const uint value = vram.Load(pos.x * 4 + pos.y * 1024 + index * 65536);
+    const uint xorValue = params.base.enabled ? 255 : 0;
+    const uint value = vram.Load(pos.x * 4 + pos.y * 1024);
     return uint4(
-        BitExtract(value, 0, 8),
-        BitExtract(value, 8, 8),
-        BitExtract(value, 16, 8),
-        BitExtract(value, 24, 8)
+        BitExtract(value, 0, 8) ^ xorValue,
+        BitExtract(value, 8, 8) ^ xorValue,
+        BitExtract(value, 16, 8) ^ xorValue,
+        BitExtract(value, 24, 8) ^ xorValue ^ (index << 6)
     );
 }
 

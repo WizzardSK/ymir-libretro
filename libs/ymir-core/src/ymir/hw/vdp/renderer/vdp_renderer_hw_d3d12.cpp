@@ -480,11 +480,13 @@ private:
 
 struct Direct3D12VDPRenderer::Impl {
     Impl(VDPState &state, const config::VDP2AccessPatternsConfig &vdp2AccessPatternsConfig,
-         const config::VDP2DebugRender &vdp2DebugRenderOptions)
+         const config::VDP2DebugRender &vdp2DebugRenderOptions, const config::Enhancements &enhancements)
         : vdpState(state)
+        , enhancements(enhancements)
         , vdp2(vdp2AccessPatternsConfig, vdp2DebugRenderOptions) {}
 
     VDPState &vdpState;
+    const config::Enhancements &enhancements;
 
     D3D12Device device;
 
@@ -646,7 +648,9 @@ struct Direct3D12VDPRenderer::Impl {
     };
 
     /// @brief VDP2 extended window parameters (includes sprite window).
-    struct VDP2WindowParamsS : public VDP2WindowParams {
+    struct VDP2WindowParamsS {
+        VDP2WindowParams base;
+
         // Sprite window enable
         bool spriteWindowEnable;
 
@@ -754,7 +758,7 @@ struct Direct3D12VDPRenderer::Impl {
         HLSLuint2 pageShift;
 
         // Base address of bitmap data.
-        // Derived from MPOFN
+        // Derived from MPOFN (NBG0-3) or MPOFR (RotParam A-B)
         HLSLuint bitmapBaseAddress;
 
         // Window parameters
@@ -762,7 +766,9 @@ struct Direct3D12VDPRenderer::Impl {
     };
 
     /// @brief VDP2 NBG layer rendering parameters.
-    struct NBGParams : public VDP2BaseBGParams {
+    struct NBGParams {
+        VDP2BaseBGParams base;
+
         // Bitmap dimensions, when the screen is in bitmap mode.
         // Derived from CHCTLA/CHCTLB.xxBMSZ
         HLSLuint2 bitmapSize;
@@ -780,7 +786,7 @@ struct Direct3D12VDPRenderer::Impl {
 
         // Page base addresses for NBG planes A-D.
         // Derived from MPOFN, MPABNn, MPCDNn, CHCTLA/CHCTLB.xxCHSZ, PNCNn.xxPNB and PLSZ.xxPLSZn
-        HLSLuint pageBaseAddresses[4];
+        std::array<HLSLuint, 4> pageBaseAddresses;
 
         // Whether to use the vertical cell scroll table in VRAM.
         // Only valid for NBG0 and NBG1.
@@ -829,7 +835,9 @@ struct Direct3D12VDPRenderer::Impl {
     };
 
     /// @brief VDP2 RBG layer rendering parameters.
-    struct RBGParams : public VDP2BaseBGParams {
+    struct RBGParams {
+        VDP2BaseBGParams base;
+
         // Rotation BG screen-over process.
         // Derived from PLSZ.RxOVRn
         HLSLuint screenOverProcess;
@@ -841,7 +849,7 @@ struct Direct3D12VDPRenderer::Impl {
         /// @brief Page base addresses for RBG planes A-P using Rotation Parameters A and B.
         /// Indexing: [RotParam A/B][Plane A-P]
         /// Derived from `mapIndices`, `CHCTLA/CHCTLB.xxCHSZ`, `PNCR.xxPNB` and `PLSZ.xxPLSZn`.
-        HLSLuint pageBaseAddresses[2][16];
+        std::array<std::array<HLSLuint, 16>, 2> pageBaseAddresses;
     };
 
     /// @brief VDP2 layer rendering parameters.
@@ -981,7 +989,7 @@ struct Direct3D12VDPRenderer::Impl {
         // ---------------------------------------------------------------------
         // Rendering state
 
-        uint32 nextBGLine = 0;
+        uint32 nextLayerRenderLine = 0;
         uint32 nextComposeLine = 0;
 
         bool rotRegsDirty = false;
@@ -1409,7 +1417,7 @@ struct Direct3D12VDPRenderer::Impl {
     void Reset() {
         vdp2.vramDirty.SetAll();
         vdp2.cramDirty = true;
-        vdp2.nextBGLine = 0;
+        vdp2.nextLayerRenderLine = 0;
         vdp2.nextComposeLine = 0;
         vdp2.rotRegsDirty = true;
         vdp2.layerRenderParamsDirty = true;
@@ -1619,7 +1627,7 @@ struct Direct3D12VDPRenderer::Impl {
         return {};
     }
 
-    util::VoidResult<> VDP2FlushVRAM() {
+    [[nodiscard]] util::VoidResult<> VDP2FlushVRAM() {
         if (!vdp2.vramDirty) {
             return {};
         }
@@ -1658,14 +1666,11 @@ struct Direct3D12VDPRenderer::Impl {
         return {};
     }
 
-    util::VoidResult<> VDP2FlushCRAM() {
+    [[nodiscard]] util::VoidResult<> VDP2FlushCRAM() {
         if (!vdp2.cramDirty) {
             return {};
         }
         vdp2.cramDirty = false;
-
-        VDP2FrameContext &frame = vdp2.frames.GetCurrentFrame();
-        const size_t frameIndex = vdp2.frames.frameIndex;
 
         ID3D12Resource *uploadBufferPtr = vdp2.uploadBuffer.GetBufferResource().GetPointer();
         UploadAllocation alloc{};
@@ -1706,6 +1711,185 @@ struct Direct3D12VDPRenderer::Impl {
         }
 
         barrier.Reverse().Emit(vdp2.cmdList);
+
+        return {};
+    }
+
+    void VDP2UpdateCommonRenderParams() {
+        // vdp2.cpuCommonRenderParams.startY is updated by the line rendering functions.
+
+        // TODO: other fields
+
+        // NOTE: this is uploaded as 32-bit root constants, not through the upload buffer
+    }
+
+    util::VoidResult<> VDP2UpdateLayerRenderParams() {
+        if (!vdp2.layerRenderParamsDirty) {
+            return {};
+        }
+        vdp2.layerRenderParamsDirty = false;
+
+        const VDP2Regs &regs2 = vdpState.regs2;
+
+        auto condenseBools = [](std::span<const bool> bools) {
+            uint32 value = 0;
+            for (size_t i = 0; i < bools.size(); ++i) {
+                if (bools[i]) {
+                    value |= 1u << i;
+                }
+            }
+            return value;
+        };
+
+        // These can be either 0 or 8, but we'll condense them to single bits
+        auto condenseVRAMDataOffsets = [](const std::array<uint32, 4> values) {
+            uint32 value = 0;
+            for (size_t i = 0; i < values.size(); ++i) {
+                if (values[i] != 0u) {
+                    value |= 1u << i;
+                }
+            }
+            return value;
+        };
+
+        // NBG0-3
+        for (int i = 0; i < 4; ++i) {
+            const BGParams &bgParams = regs2.bgParams[i + 1];
+            const NBGLayerState &bgState = vdpState.state2.nbgLayerStates[i];
+
+            const bool bitmap = bgParams.bitmap;
+
+            NBGParams &renderParams = vdp2.cpuLayerRenderParams.nbg[i];
+            renderParams.base.enabled = regs2.bgEnabled[i];
+            renderParams.base.enableTransparency = bgParams.enableTransparency;
+            renderParams.base.bitmap = bgParams.bitmap;
+            renderParams.base.priorityNumber = bgParams.priorityNumber;
+            renderParams.base.priorityMode = static_cast<HLSLuint>(bgParams.priorityMode);
+            renderParams.base.specialFunctionSelect = bgParams.specialFunctionSelect;
+            renderParams.base.cellSizeShift = bgParams.cellSizeShift;
+            renderParams.base.colorFormat = static_cast<HLSLuint>(bgParams.colorFormat);
+            renderParams.base.cramOffset = bgParams.cramOffset;
+            renderParams.base.supplScrollCharNum = bgParams.supplScrollCharNum;
+            renderParams.base.supplPalNum = bitmap ? bgParams.supplBitmapPalNum : bgParams.supplScrollPalNum;
+            renderParams.base.supplSpecialColorCalc =
+                bitmap ? bgParams.supplBitmapSpecialColorCalc : bgParams.supplScrollSpecialColorCalc;
+            renderParams.base.supplSpecialPriority =
+                bitmap ? bgParams.supplBitmapSpecialPriority : bgParams.supplScrollSpecialPriority;
+            renderParams.base.mosaicEnable = bgParams.mosaicEnable;
+            renderParams.base.colorCalcEnable = bgParams.colorCalcEnable;
+            renderParams.base.extChar = bgParams.extChar;
+            renderParams.base.twoWordChar = bgParams.twoWordChar;
+            renderParams.base.patNameAccess = condenseBools(bgParams.patNameAccess);
+            renderParams.base.charPatAccess = condenseBools(bgParams.charPatAccess);
+            renderParams.base.charPatDelay = condenseBools(bgParams.charPatDelay);
+            renderParams.base.vramDataOffset = condenseVRAMDataOffsets(bgParams.vramDataOffset);
+            renderParams.base.specialColorCalcMode = static_cast<HLSLuint>(bgParams.specialColorCalcMode);
+            renderParams.base.pageShift = {bgParams.pageShiftH, bgParams.pageShiftV};
+            renderParams.base.bitmapBaseAddress = bgParams.bitmapBaseAddress;
+            renderParams.base.windowParams.base.windowLogicAnd = bgParams.windowSet.logic == WindowLogic::And;
+            renderParams.base.windowParams.base.window0Enable = bgParams.windowSet.enabled[0];
+            renderParams.base.windowParams.base.window0Invert = bgParams.windowSet.inverted[0];
+            renderParams.base.windowParams.base.window1Enable = bgParams.windowSet.enabled[1];
+            renderParams.base.windowParams.base.window1Invert = bgParams.windowSet.inverted[1];
+            renderParams.base.windowParams.spriteWindowEnable = bgParams.windowSet.enabled[2];
+            renderParams.base.windowParams.spriteWindowInvert = bgParams.windowSet.inverted[2];
+
+            renderParams.bitmapSize = {bgParams.bitmapSizeH, bgParams.bitmapSizeV};
+            renderParams.scrollAmount = {bgParams.scrollAmountH, bgParams.scrollAmountV};
+            renderParams.scrollInc = {bgState.scrollIncH, bgParams.scrollIncV};
+            renderParams.pageBaseAddresses = bgParams.pageBaseAddresses;
+            renderParams.vcellScrollEnable = bgParams.vcellScrollEnable;
+            renderParams.lineScrollXEnable = bgParams.lineScrollXEnable;
+            renderParams.lineScrollYEnable = bgParams.lineScrollYEnable;
+            renderParams.lineZoomEnable = bgParams.lineZoomEnable;
+            renderParams.lineScrollInterval = bgParams.lineScrollInterval;
+            renderParams.lineScrollTableAddress = bgState.lineScrollTableAddress;
+            renderParams.vcellScrollOffset = bgState.vcellScrollOffset;
+            renderParams.vcellScrollDelay = bgState.vcellScrollDelay;
+            renderParams.vcellScrollRepeat = bgState.vcellScrollRepeat;
+        }
+
+        // RBG0-1 / RotParam A-B
+        for (int i = 0; i < 2; ++i) {
+            const BGParams &bgParams = regs2.bgParams[i];
+            const RotationParams &rotParams = regs2.rotParams[i];
+            const RotationParamState &rotState = vdpState.state2.rotParamStates[i];
+
+            const bool bitmap = bgParams.bitmap;
+
+            // TODO: use these in the rotparams renderer:
+            // rotParams.coeffDataMode;
+            // rotParams.coeffDataSize;
+            // rotParams.coeffTableAddressOffset;
+            // rotParams.coeffTableEnable;
+            // rotParams.coeffUseLineColorData;
+
+            RBGParams &renderParams = vdp2.cpuLayerRenderParams.rbg[i];
+            renderParams.base.enabled = regs2.bgEnabled[i];
+            renderParams.base.enableTransparency = bgParams.enableTransparency;
+            renderParams.base.bitmap = bgParams.bitmap;
+            renderParams.base.priorityNumber = bgParams.priorityNumber;
+            renderParams.base.priorityMode = static_cast<HLSLuint>(bgParams.priorityMode);
+            renderParams.base.specialFunctionSelect = bgParams.specialFunctionSelect;
+            renderParams.base.cellSizeShift = bgParams.cellSizeShift;
+            renderParams.base.colorFormat = static_cast<HLSLuint>(bgParams.colorFormat);
+            renderParams.base.cramOffset = bgParams.cramOffset;
+            renderParams.base.supplScrollCharNum = bgParams.supplScrollCharNum;
+            renderParams.base.supplPalNum = bitmap ? bgParams.supplBitmapPalNum : bgParams.supplScrollPalNum;
+            renderParams.base.supplSpecialColorCalc =
+                bitmap ? bgParams.supplBitmapSpecialColorCalc : bgParams.supplScrollSpecialColorCalc;
+            renderParams.base.supplSpecialPriority =
+                bitmap ? bgParams.supplBitmapSpecialPriority : bgParams.supplScrollSpecialPriority;
+            renderParams.base.mosaicEnable = bgParams.mosaicEnable;
+            renderParams.base.colorCalcEnable = bgParams.colorCalcEnable;
+            renderParams.base.extChar = bgParams.extChar;
+            renderParams.base.twoWordChar = bgParams.twoWordChar;
+            renderParams.base.patNameAccess = condenseBools(bgParams.patNameAccess);
+            renderParams.base.charPatAccess = condenseBools(bgParams.charPatAccess);
+            renderParams.base.charPatDelay = condenseBools(bgParams.charPatDelay);
+            renderParams.base.vramDataOffset = condenseVRAMDataOffsets(bgParams.vramDataOffset);
+            renderParams.base.specialColorCalcMode = static_cast<HLSLuint>(bgParams.specialColorCalcMode);
+            renderParams.base.pageShift = {rotParams.pageShiftH, rotParams.pageShiftV};
+            renderParams.base.bitmapBaseAddress = rotParams.bitmapBaseAddress;
+            renderParams.base.windowParams.base.windowLogicAnd = bgParams.windowSet.logic == WindowLogic::And;
+            renderParams.base.windowParams.base.window0Enable = bgParams.windowSet.enabled[0];
+            renderParams.base.windowParams.base.window0Invert = bgParams.windowSet.inverted[0];
+            renderParams.base.windowParams.base.window1Enable = bgParams.windowSet.enabled[1];
+            renderParams.base.windowParams.base.window1Invert = bgParams.windowSet.inverted[1];
+            renderParams.base.windowParams.spriteWindowEnable = bgParams.windowSet.enabled[2];
+            renderParams.base.windowParams.spriteWindowInvert = bgParams.windowSet.inverted[2];
+
+            renderParams.screenOverProcess = static_cast<HLSLuint>(rotParams.screenOverProcess);
+            renderParams.screenOverPatternName = rotParams.screenOverPatternName;
+            renderParams.pageBaseAddresses[0] = vdpState.state2.rbgPageBaseAddresses[0][i];
+            renderParams.pageBaseAddresses[1] = vdpState.state2.rbgPageBaseAddresses[1][i];
+        }
+
+        // Update buffer
+        {
+            ID3D12Resource *uploadBufferPtr = vdp2.uploadBuffer.GetBufferResource().GetPointer();
+            UploadAllocation alloc{};
+
+            BufferTransitionBarrierSet barrier{features.enhancedBarriers};
+            barrier.Add(uploadBufferPtr, vdp2.uploadBuffer.GetSize(),                //
+                        D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_COPY, //
+                        D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_ACCESS_COPY_DEST, //
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+            barrier.Emit(vdp2.cmdList);
+
+            const size_t size = sizeof(vdp2.cpuLayerRenderParams);
+            if (auto result = VDP2AllocateUploadBuffer(size, 4, alloc); !result) {
+                return util::ErrorMessage{
+                    fmt::format("Failed to allocate upload buffer for VDP2 layer rendering parameters: {}",
+                                result.Error().message)};
+            }
+            memcpy(alloc.data, &vdp2.cpuLayerRenderParams, size);
+
+            ID3D12Resource *dstResource = vdp2.layerRenderParamsBuffer.GetPointer();
+            vdp2.cmdList->CopyBufferRegion(dstResource, 0, uploadBufferPtr, alloc.offset, size);
+
+            barrier.Reverse().Emit(vdp2.cmdList);
+        }
 
         return {};
     }
@@ -1816,10 +2000,14 @@ struct Direct3D12VDPRenderer::Impl {
     }
 
     void VDP2UpdateState() {
-        VDP2FlushVRAM();
-        VDP2FlushCRAM();
-        // TODO: VDP2UpdateCommonRenderParams();
-        // TODO: VDP2UpdateLayerRenderParams();
+        if (auto result = VDP2FlushVRAM(); !result) {
+            devlog::warn<grp::dx12_vdp2>("VDP2 VRAM flush failed: {}", result.Error().message);
+        }
+        if (auto result = VDP2FlushCRAM(); !result) {
+            devlog::warn<grp::dx12_vdp2>("VDP2 CRAM flush failed: {}", result.Error().message);
+        }
+        VDP2UpdateCommonRenderParams();
+        VDP2UpdateLayerRenderParams();
         // TODO: VDP2UpdateRotRegs();
         // TODO: VDP2UpdateComposeParams();
     }
@@ -1827,7 +2015,7 @@ struct Direct3D12VDPRenderer::Impl {
     void VDP2BeginFrame() {
         auto &cmdList = vdp2.cmdList;
 
-        vdp2.nextBGLine = 0;
+        vdp2.nextLayerRenderLine = 0;
         vdp2.nextComposeLine = 0;
 
         VDP2CalcAccessPatterns();
@@ -1837,12 +2025,69 @@ struct Direct3D12VDPRenderer::Impl {
     }
 
     void VDP2RenderLayerLines(uint32 y) {
-        // TODO: implement
-        // - if BG rendering state is dirty:
-        //   - set rendering parameters
-        //   - render BG lines from bgRenderSegmentStartY to y-1 (if possible)
-        //   - set bgRenderSegmentStartY = y
-        //   - clear dirty state
+        // Bail out if there's nothing to render
+        if (y < vdp2.nextLayerRenderLine) {
+            return;
+        }
+
+        auto &cmdList = vdp2.cmdList;
+
+        // Transition all rendering resources to compute shading usage
+        BufferTransitionBarrierSet barriers{features.enhancedBarriers};
+        barriers.Add(vdp2.vramBuffer.GetPointer(), kVDP2VRAMSize,                 //
+                     D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_COMPUTE_SHADING, //
+                     D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_COMMON, //
+                     D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        barriers.Add(vdp2.cramColorBuffer.GetPointer(), kVDP2CRAMColorBufferSize, //
+                     D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_COMPUTE_SHADING, //
+                     D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_COMMON, //
+                     D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        barriers.Add(vdp2.layerRenderParamsBuffer.GetPointer(), sizeof(vdp2.cpuLayerRenderParams), //
+                     D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_COMPUTE_SHADING,                  //
+                     D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_COMMON,                  //
+                     D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        barriers.Emit(cmdList);
+
+        const bool deinterlace = enhancements.deinterlace && vdpState.regs2.TVMD.IsInterlaced();
+        const uint32 yShift = deinterlace ? 1u : 0u;
+
+        const uint32 startY = vdp2.nextLayerRenderLine;
+
+        // Determine how many lines to draw and update next scanline counter
+        const uint32 baseNumLines = y - startY + 1;
+        const uint32 numLines = baseNumLines << yShift;
+        const uint32 baseNumScaledLines = y - startY + 1; // ScaleUpCeil(y) - ScaleUp(startY) + 1;
+        const uint32 numScaledLines = baseNumScaledLines << yShift;
+        vdp2.nextLayerRenderLine = y + 1;
+
+        // Compute rotation parameters if any RBGs are enabled
+        if (vdpState.regs2.bgEnabled[4] || vdpState.regs2.bgEnabled[5]) {
+            vdp2.cpuCommonRenderParams.startY = startY;
+
+            // VDP2UploadRotationParameterBases();
+
+            // TODO: configure and execute rotparams shader
+
+            // const bool doubleResH = vdpState.regs2.TVMD.HRESOn & 0b010;
+            // const uint32 hresShift = doubleResH ? 1 : 0;
+            // const uint32 hres = HRes >> hresShift;
+            // vdp2.cmdList->Dispatch(hres / 32, numLines, 1);
+        }
+
+        // TODO: Draw sprite layer
+        // cmdList->Dispatch((ScaleUpCeil(m_HRes) + 31) / 32, numScaledLines, enhancements.transparentMeshes ? 2 : 1);
+
+        // TODO: Draw color calculation window
+        // cmdList->Dispatch(HRes / 32, numLines, 1);
+
+        // Draw NBGs and RBGs
+        cmdList->SetPipelineState(vdp2.drawBGsPSO.GetPointer());
+        cmdList->SetComputeRootSignature(vdp2.drawBGsRootSig.GetPointer());
+        cmdList->SetComputeRoot32BitConstants(0, sizeof(vdp2.cpuCommonRenderParams) / sizeof(uint32),
+                                              &vdp2.cpuCommonRenderParams, 0);
+        cmdList->SetComputeRootDescriptorTable(1, vdp2.drawBGsDescs.gpuHandle);
+        // cmdList->Dispatch((ScaleUpCeil(m_HRes) + 31) / 32, numScaledLines, 1);
+        cmdList->Dispatch(HRes / 32, numScaledLines, 1);
     }
 
     void VDP2ComposeLines(uint32 y) {
@@ -1865,8 +2110,8 @@ struct Direct3D12VDPRenderer::Impl {
         // render lines up to Y-1 then sync the state, unless Y=0, in which case we just sync the state.
 
         if (y > 0) {
-            const bool renderLayers = vdp2.vramDirty || vdp2.cramDirty || vdp2.rotRegsDirty ||
-                                      vdp2.layerRenderParamsDirty || vdp2.composeParamsDirty;
+            const bool renderLayers = vdp2.vramDirty || vdp2.cramDirty /*|| vdp2.rotRegsDirty*/ ||
+                                      vdp2.layerRenderParamsDirty /*|| vdp2.composeParamsDirty*/;
             const bool compose = vdp2.composeParamsDirty;
             if (renderLayers) {
                 VDP2RenderLayerLines(y - 1);
@@ -1885,30 +2130,7 @@ struct Direct3D12VDPRenderer::Impl {
         VDP2RenderLayerLines(vres - 1);
         VDP2ComposeLines(VRes - 1);
 
-        VDP2UpdateState();
-
-        // ---------------------------
-        // TODO: this section is just for testing; remove it
-        BufferTransitionBarrierSet barriers{features.enhancedBarriers};
-        barriers.Add(vdp2.vramBuffer.GetPointer(), kVDP2VRAMSize,                 //
-                     D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_COMPUTE_SHADING, //
-                     D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_COMMON, //
-                     D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        barriers.Add(vdp2.cramColorBuffer.GetPointer(), kVDP2CRAMColorBufferSize, //
-                     D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_COMPUTE_SHADING, //
-                     D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_ACCESS_COMMON, //
-                     D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        barriers.Emit(vdp2.cmdList);
-
         auto &cmdList = vdp2.cmdList;
-        cmdList->SetPipelineState(vdp2.drawBGsPSO.GetPointer());
-        cmdList->SetComputeRootSignature(vdp2.drawBGsRootSig.GetPointer());
-        cmdList->SetComputeRoot32BitConstants(0, sizeof(vdp2.cpuCommonRenderParams) / sizeof(uint32),
-                                              &vdp2.cpuCommonRenderParams, 0);
-        cmdList->SetComputeRootDescriptorTable(1, vdp2.drawBGsDescs.gpuHandle);
-        cmdList->Dispatch(kMaxResH / 32, kMaxResV, 6);
-
-        // ---------------------------
 
         // Close and submit command list
         cmdList->Close();
@@ -1932,7 +2154,7 @@ struct Direct3D12VDPRenderer::Impl {
 Direct3D12VDPRenderer::Direct3D12VDPRenderer(VDPState &state, const config::VDP2DebugRender &vdp2DebugRenderOptions,
                                              const config::VDP2AccessPatternsConfig &vdp2AccessPatternsConfig)
     : HardwareVDPRendererBase(VDPRendererType::Direct3D12)
-    , m_impl(std::make_unique<Impl>(state, vdp2AccessPatternsConfig, vdp2DebugRenderOptions)) {}
+    , m_impl(std::make_unique<Impl>(state, vdp2AccessPatternsConfig, vdp2DebugRenderOptions, m_enhancements)) {}
 
 Direct3D12VDPRenderer::~Direct3D12VDPRenderer() {
     m_impl->Shutdown();
