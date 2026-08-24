@@ -1,12 +1,10 @@
 #ifndef YMIR_VDP_VDP2_RENDER_PARAMS_HLSLI
 #define YMIR_VDP_VDP2_RENDER_PARAMS_HLSLI
 
-struct RenderParams {
-    // uint startY;
-};
+// #include "vdp2_defs.hlsli"
 
-cbuffer RenderParams : register(b0) {
-    RenderParams g_renderParams;
-}
+struct RenderParams {
+    uint startY;
+};
 
 #endif

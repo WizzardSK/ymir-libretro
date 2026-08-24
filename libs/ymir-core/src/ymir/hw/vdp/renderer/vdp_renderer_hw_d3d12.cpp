@@ -80,6 +80,64 @@ struct ColorR8G8B8A8 {
 };
 static_assert(sizeof(ColorR8G8B8A8) == sizeof(uint32));
 
+using HLSLint = sint32;
+using HLSLuint = uint32;
+
+union HLSLuint2 {
+    std::array<HLSLuint, 2> array;
+    struct {
+        HLSLuint x, y;
+    };
+    struct {
+        HLSLuint r, g;
+    };
+};
+static_assert(sizeof(HLSLuint2) == sizeof(HLSLuint) * 2);
+
+union HLSLuint3 {
+    std::array<HLSLuint, 3> array;
+    struct {
+        HLSLuint x, y, z;
+    };
+    struct {
+        HLSLuint r, g, b;
+    };
+};
+static_assert(sizeof(HLSLuint3) == sizeof(HLSLuint) * 3);
+
+union HLSLuint4 {
+    std::array<HLSLuint, 4> array;
+    struct {
+        HLSLuint x, y, z, w;
+    };
+    struct {
+        HLSLuint r, g, b, a;
+    };
+};
+static_assert(sizeof(HLSLuint4) == sizeof(HLSLuint) * 4);
+
+union HLSLint2 {
+    std::array<HLSLint, 2> array;
+    struct {
+        HLSLint x, y;
+    };
+    struct {
+        HLSLint r, g;
+    };
+};
+static_assert(sizeof(HLSLint2) == sizeof(HLSLint) * 2);
+
+union HLSLint3 {
+    std::array<HLSLint, 3> array;
+    struct {
+        HLSLint x, y, z;
+    };
+    struct {
+        HLSLint r, g, b;
+    };
+};
+static_assert(sizeof(HLSLint3) == sizeof(HLSLint) * 3);
+
 // Base Xst, Yst, KA for params A and B relative to startY
 struct alignas(16) VDP2RotParamBase {
     uint32 tableAddress;
@@ -567,10 +625,229 @@ struct Direct3D12VDPRenderer::Impl {
         // TODO: bit-pack more common parameters to minimize DWORDs spent with this
     };
 
-    /// @brief VDP2 NBG/RBG layer rendering parameters.
-    struct VDP2BGLayerParams {
-        // TODO: add layer parameters
-        // - no need to bit-pack, they're passed in as structured buffers
+    /// @brief VDP2 window parameters.
+    struct VDP2WindowParams {
+        // Window logic
+        //   false = OR
+        //   true = AND
+        bool windowLogicAnd;
+
+        // Window 0 enable
+        bool window0Enable;
+
+        // Window 0 invert
+        bool window0Invert;
+
+        // Window 1 enable
+        bool window1Enable;
+
+        // Window 1 invert
+        bool window1Invert;
+    };
+
+    /// @brief VDP2 extended window parameters (includes sprite window).
+    struct VDP2WindowParamsS : public VDP2WindowParams {
+        // Sprite window enable
+        bool spriteWindowEnable;
+
+        // Sprite window invert
+        bool spriteWindowInvert;
+    };
+
+    /// @brief Base VDP2 layer rendering parameters, common to NBGs and RBGs.
+    struct VDP2BaseBGParams {
+        // Background enabled
+        bool enabled;
+
+        // If true, honor transparency bit in color data.
+        // Derived from BGON.xxTPON
+        bool enableTransparency;
+
+        // Whether the background uses cells (false) or a bitmap (true).
+        // Derived from CHCTLA/CHCTLB.xxBMEN
+        bool bitmap;
+
+        // Priority number from 0 (transparent) to 7 (highest).
+        // Derived from PRINA/PRINB/PRIR.xxPRINn
+        HLSLuint priorityNumber;
+
+        // Special priority mode.
+        // Derived from SFPRMD.xxSPRMn
+        HLSLuint priorityMode;
+
+        // Special function select (0=A, 1=B).
+        // Derived from SFSEL.xxSFCS
+        HLSLuint specialFunctionSelect;
+
+        // Cell size shift corresponding to the dimensions of a character pattern (0=1x1, 1=2x2).
+        // Derived from CHCTLA/CHCTLB.xxCHSZ
+        HLSLuint cellSizeShift;
+
+        // Character color format.
+        // Derived from CHCTLA/CHCTLB.xxCHCNn
+        HLSLuint colorFormat;
+
+        // Color RAM base offset.
+        // Derived from CRAOFA/CRAOFB.xxCAOSn
+        HLSLuint cramOffset;
+
+        // Supplementary bits 4-0 for scroll screen character number, when using 1-word characters.
+        // Derived from PNCNn/PNCR.xxSCNn
+        HLSLuint supplScrollCharNum;
+
+        // Supplementary bits 6-4 for palette number.
+        // Used with scroll screen when using 1-word characters, or with bitmap screens.
+        // The value is already shifted in place to optimize rendering calculations.
+        // Derived from PNCNn/PNCR.xxSPLTn (scroll) or BMPNA/BMPNB.xxBMPn (bitmap)
+        HLSLuint supplPalNum;
+
+        // Supplementary special color calculation bit.
+        // Derived from PNCNn/PNCR.xxSCC (scroll) or BMPNA/BMPNB.xxBMCC (bitmap)
+        HLSLuint supplSpecialColorCalc;
+
+        // Supplementary special priority bit.
+        // Derived from PNCNn/PNCR.xxSPR (scroll) or BMPNA/BMPNB.xxBMPR (bitmap)
+        HLSLuint supplSpecialPriority;
+
+        // Enables the mosaic effect.
+        // If vertical cell scroll is also enabled, the mosaic effect is bypassed.
+        // Derived from MZCTL.xxMZE
+        bool mosaicEnable;
+
+        // Enables color calculation.
+        // Derived from CCCTL.xxCCEN
+        bool colorCalcEnable;
+
+        // Character number width: 10 bits (false) or 12 bits (true).
+        // When true, disables the horizontal and vertical flip bits in the character.
+        // Derived from PNCNn/PNCR.xxCNSM
+        bool extChar;
+
+        // Whether characters use one (false) or two (true) words.
+        // Derived from PNCNn/PNCR.xxPNB
+        bool twoWordChar;
+
+        // Whether pattern name data is accessible for each VRAM bank (bits 0 to 3: A0, A1, B0, B1).
+        // Derived from CYCxn, RAMCTL and BGON (for RBG0/1 restrictions to NBGs)
+        HLSLuint patNameAccess;
+
+        // Whether character pattern data is accessible for each VRAM bank (bits 0 to 3: A0, A1, B0, B1).
+        // Derived from CYCxn, RAMCTL and BGON (for RBG0/1 restrictions to NBGs)
+        HLSLuint charPatAccess;
+
+        // Whether accesses to character pattern data for this background is delayed per bank due to illegal VRAM access
+        // patterns (bits 0 to 3: A0, A1, B0, B1). Derived from CYCxn, RAMCTL, ZMCTL and CHCTLA/CHCTLB.xxCHSZ
+        HLSLuint charPatDelay;
+
+        // Address offset for VRAM data for this background on each VRAM bank caused by illegal VRAM access patterns
+        // (bits 0 to 3: A0, A1, B0, B1). Derived from CYCxn, RAMCTL and ZMCTL
+        HLSLuint vramDataOffset;
+
+        // Special color calculation mode.
+        // Derived from SFCCMD.xxSCCMn
+        HLSLuint specialColorCalcMode;
+
+        // Page shifts are either 0 or 1, used when determining which plane a particular (x,y) coordinate belongs to.
+        // A shift of 0 corresponds to 1 page per plane dimension.
+        // A shift of 1 corresponds to 2 pages per plane dimension.
+        // Derived from PLSZ.xxPLSZn
+        HLSLuint2 pageShift;
+
+        // Base address of bitmap data.
+        // Derived from MPOFN
+        HLSLuint bitmapBaseAddress;
+
+        // Window parameters
+        VDP2WindowParamsS windowParams;
+    };
+
+    /// @brief VDP2 NBG layer rendering parameters.
+    struct NBGParams : public VDP2BaseBGParams {
+        // Bitmap dimensions, when the screen is in bitmap mode.
+        // Derived from CHCTLA/CHCTLB.xxBMSZ
+        HLSLuint2 bitmapSize;
+
+        // Screen scroll amount, in 11.8 fixed-point format.
+        // Used in scroll NBGs.
+        // Scroll amounts for NBGs 2 and 3 do not have a fractional part, but the values are still stored with 8
+        // fractional bits here for consistency and ease of implementation. Derived from SCXINn and SCXDNn
+        HLSLuint2 scrollAmount;
+
+        // Screen scroll increment per pixel, in 11.8 fixed-point format.
+        // NBGs 2 and 3 do not have increment registers; they always increment each coordinate by 1.0, which is stored
+        // here for consistency and ease of implementation. Derived from ZMXINn and ZMXDNn
+        HLSLuint2 scrollInc;
+
+        // Page base addresses for NBG planes A-D.
+        // Derived from MPOFN, MPABNn, MPCDNn, CHCTLA/CHCTLB.xxCHSZ, PNCNn.xxPNB and PLSZ.xxPLSZn
+        HLSLuint pageBaseAddresses[4];
+
+        // Whether to use the vertical cell scroll table in VRAM.
+        // Only valid for NBG0 and NBG1.
+        // Derived from SCRCTL.NnVCSC
+        bool vcellScrollEnable;
+
+        // Whether to use the horizontal line scroll table in VRAM.
+        // Only valid for NBG0 and NBG1.
+        // Derived from SCRCTL.NnLSCX
+        bool lineScrollXEnable;
+
+        // Whether to use the vertical line scroll table in VRAM.
+        // Only valid for NBG0 and NBG1.
+        // Derived from SCRCTL.NnLSCY
+        bool lineScrollYEnable;
+
+        // Whether to use horizontal line zoom/scaling.
+        // Only valid for NBG0 and NBG1.
+        // Derived from SCRCTL.NnLZMX
+        bool lineZoomEnable;
+
+        // Line scroll table interval shift. The interval is calculated as (1 << lineScrollInterval).
+        // Only valid for NBG0 and NBG1.
+        // Derived from SCRCTL.NnLSS1-0
+        HLSLuint lineScrollInterval;
+
+        // Line scroll table base address.
+        // Only valid for NBG0 and NBG1.
+        // Derived from LSTAnU/L
+        HLSLuint lineScrollTableAddress;
+
+        // Vertical cell scroll offset.
+        // Only valid for NBG0 and NBG1.
+        // Based on CYCA0/A1/B0/B1 parameters.
+        HLSLuint vcellScrollOffset;
+
+        // Is the vertical cell scroll read delayed by one cycle?
+        // Only valid for NBG0 and NBG1.
+        // Based on CYCA0/A1/B0/B1 parameters.
+        HLSLuint vcellScrollDelay;
+
+        // Is the first vertical cell scroll entry repeated?
+        // Only valid for NBG0.
+        // Based on CYCA0/A1/B0/B1 parameters.
+        HLSLuint vcellScrollRepeat;
+    };
+
+    /// @brief VDP2 RBG layer rendering parameters.
+    struct RBGParams : public VDP2BaseBGParams {
+        // Rotation BG screen-over process.
+        // Derived from PLSZ.RxOVRn
+        HLSLuint screenOverProcess;
+
+        // Screen-over pattern name value.
+        // Derived from OVPNRA/B
+        HLSLuint screenOverPatternName;
+
+        /// @brief Page base addresses for RBG planes A-P using Rotation Parameters A and B.
+        /// Indexing: [RotParam A/B][Plane A-P]
+        /// Derived from `mapIndices`, `CHCTLA/CHCTLB.xxCHSZ`, `PNCR.xxPNB` and `PLSZ.xxPLSZn`.
+        HLSLuint pageBaseAddresses[2][16];
+    };
+
+    /// @brief VDP2 layer rendering parameters.
+    struct VDP2LayerRenderParams {
+        NBGParams nbg[4];
+        RBGParams rbg[2];
     };
 
     /// @brief VDP2 compositor parameters.
@@ -680,10 +957,17 @@ struct Direct3D12VDPRenderer::Impl {
 
         // ---------------------------------------------------------------------
 
-        /// @brief Common rendering parameters.
+        /// @brief Common rendering parameters, uploaded as 32-bit root constants.
         VDP2CommonRenderParams cpuCommonRenderParams;
 
         // ---------------------------------------------------------------------
+
+        /// @brief Layer rendering parameters buffer.
+        D3D12Resource layerRenderParamsBuffer;
+        /// @brief Layer rendering parameters buffer SRV (offline).
+        DescriptorRange layerRenderParamsSRV;
+        /// @brief CPU-side layer rendering parameters.
+        VDP2LayerRenderParams cpuLayerRenderParams;
 
         /// @brief Compute shader for drawing background layers.
         gpu::ComputeShader drawBGsShader;
@@ -701,7 +985,7 @@ struct Direct3D12VDPRenderer::Impl {
         uint32 nextComposeLine = 0;
 
         bool rotRegsDirty = false;
-        bool bgRenderParamsDirty = false;
+        bool layerRenderParamsDirty = false;
         bool composeParamsDirty = false;
 
         const config::VDP2AccessPatternsConfig &accessPatternsConfig;
@@ -1010,6 +1294,34 @@ struct Direct3D12VDPRenderer::Impl {
                                              vdp2.rotParamBasesSRV.cpuHandle);
         }
 
+        // VDP2 layer rendering parameters buffer
+        {
+            auto builder = vdp2.layerRenderParamsBuffer.BufferBuilder(sizeof(vdp2.cpuLayerRenderParams));
+            if (HRESULT hr = builder.BuildCommitted(device); FAILED(hr)) {
+                return util::ErrorMessage{fmt::format(
+                    "Could not create VDP2 layer rendering parameters buffer, error code {:X}", (uint32)hr)};
+            }
+            vdp2.layerRenderParamsBuffer->SetName(L"[Ymir-VDP2] Layer rendering parameters buffer");
+
+            if (!offlineHeapAlloc.Allocate(vdp2.layerRenderParamsSRV)) {
+                return util::ErrorMessage{"Could not allocate VDP2 layer rendering parameters buffer SRV"};
+            }
+            const D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{
+                .Format = DXGI_FORMAT_UNKNOWN,
+                .ViewDimension = D3D12_SRV_DIMENSION_BUFFER,
+                .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                .Buffer =
+                    {
+                        .FirstElement = 0,
+                        .NumElements = 1,
+                        .StructureByteStride = sizeof(vdp2.cpuLayerRenderParams),
+                        .Flags = D3D12_BUFFER_SRV_FLAG_NONE,
+                    },
+            };
+            device->CreateShaderResourceView(vdp2.layerRenderParamsBuffer.GetPointer(), &srvDesc,
+                                             vdp2.layerRenderParamsSRV.cpuHandle);
+        }
+
         // Draw background layers compute shader, root signature, pipeline state object and descriptors
         {
             auto shaderBlobResult = LoadShader("src/vdp/vdp2_render_bgs_cs.cso");
@@ -1029,7 +1341,7 @@ struct Direct3D12VDPRenderer::Impl {
 
             auto rootSigBuilder = vdp2.drawBGsRootSig.Builder();
             rootSigBuilder.Add32BitConstants(0, sizeof(VDP2CommonRenderParams) / sizeof(uint32));
-            rootSigBuilder.AddDescriptorTable().AddSRVs(2, 0).AddUAVs(1, 0);
+            rootSigBuilder.AddDescriptorTable().AddSRVs(3, 0).AddUAVs(1, 0);
             if (HRESULT hr = rootSigBuilder.Build(device); FAILED(hr)) {
                 return util::ErrorMessage{fmt::format(
                     "Could not build VDP2 background layer rendering root signature, error code {:X}", (uint32)hr)};
@@ -1047,23 +1359,20 @@ struct Direct3D12VDPRenderer::Impl {
             }
             vdp2.drawBGsPSO->SetName(L"[Ymir-VDP2] Background layer rendering pipeline state object");
 
-            if (!resourceHeapAlloc.Allocate(vdp2.drawBGsDescs, 3)) {
+            if (!resourceHeapAlloc.Allocate(vdp2.drawBGsDescs, 4)) {
                 return util::ErrorMessage{"Could not allocate VDP2 background layer rendering descriptors"};
             }
 
-            const D3D12_CPU_DESCRIPTOR_HANDLE srcHandles[] = {vdp2.vramSRV.cpuHandle, vdp2.cramColorSRV.cpuHandle,
-                                                              vdp2.layerOutUAV.cpuHandle};
-            const UINT srcSizes[] = {1, 1, 1};
+            const D3D12_CPU_DESCRIPTOR_HANDLE srcHandles[] = {
+                vdp2.vramSRV.cpuHandle,
+                vdp2.cramColorSRV.cpuHandle,
+                vdp2.layerRenderParamsSRV.cpuHandle,
+                vdp2.layerOutUAV.cpuHandle,
+            };
+            const UINT srcSizes[] = {1, 1, 1, 1};
 
             device->CopyDescriptors(1, &vdp2.drawBGsDescs.cpuHandle, &vdp2.drawBGsDescs.count, std::size(srcHandles),
                                     srcHandles, srcSizes, resourceHeap.GetHeapType());
-
-            // device->CopyDescriptorsSimple(1, vdp2.drawBGsDescs.GetCPUHandle(0), vdp2.vramSRV.cpuHandle,
-            //                               resourceHeap.GetHeapType());
-            // device->CopyDescriptorsSimple(1, vdp2.drawBGsDescs.GetCPUHandle(1), vdp2.cramColorSRV.cpuHandle,
-            //                               resourceHeap.GetHeapType());
-            // device->CopyDescriptorsSimple(1, vdp2.drawBGsDescs.GetCPUHandle(2), vdp2.layerOutUAV.cpuHandle,
-            //                               resourceHeap.GetHeapType());
         }
 
         Reset();
@@ -1103,7 +1412,7 @@ struct Direct3D12VDPRenderer::Impl {
         vdp2.nextBGLine = 0;
         vdp2.nextComposeLine = 0;
         vdp2.rotRegsDirty = true;
-        vdp2.bgRenderParamsDirty = true;
+        vdp2.layerRenderParamsDirty = true;
         vdp2.composeParamsDirty = true;
         VDP2UpdateEnabledLayers();
     }
@@ -1273,7 +1582,7 @@ struct Direct3D12VDPRenderer::Impl {
         if (address <= 0x11E) {
             const auto &dirtyFlags = kDirtyFlags[address / sizeof(uint16)];
             vdp2.rotRegsDirty |= dirtyFlags.rotRegs;
-            vdp2.bgRenderParamsDirty |= dirtyFlags.render;
+            vdp2.layerRenderParamsDirty |= dirtyFlags.render;
             vdp2.composeParamsDirty |= dirtyFlags.compose;
 
             if (dirtyFlags.enabledLayers) {
@@ -1402,7 +1711,7 @@ struct Direct3D12VDPRenderer::Impl {
     }
 
     void VDP2CalcAccessPatterns() {
-        vdp2.bgRenderParamsDirty |= vdpState.regs2.accessPatternsDirty;
+        vdp2.layerRenderParamsDirty |= vdpState.regs2.accessPatternsDirty;
         vdpState.state2.CalcAccessPatterns(vdpState.regs2, vdp2.accessPatternsConfig);
     }
 
@@ -1421,7 +1730,7 @@ struct Direct3D12VDPRenderer::Impl {
             }
         }
 
-        vdp2.bgRenderParamsDirty = true;
+        vdp2.layerRenderParamsDirty = true;
     }
 
     void VDP2UpdateEnabledLayers() {
@@ -1429,7 +1738,7 @@ struct Direct3D12VDPRenderer::Impl {
     }
 
     void VDP2CalcVCellScrollDelay() {
-        vdp2.bgRenderParamsDirty |= vdpState.regs2.accessPatternsDirty;
+        vdp2.layerRenderParamsDirty |= vdpState.regs2.accessPatternsDirty;
         vdpState.state2.CalcVCellScrollDelay(vdpState.regs2);
     }
 
@@ -1509,6 +1818,10 @@ struct Direct3D12VDPRenderer::Impl {
     void VDP2UpdateState() {
         VDP2FlushVRAM();
         VDP2FlushCRAM();
+        // TODO: VDP2UpdateCommonRenderParams();
+        // TODO: VDP2UpdateLayerRenderParams();
+        // TODO: VDP2UpdateRotRegs();
+        // TODO: VDP2UpdateComposeParams();
     }
 
     void VDP2BeginFrame() {
@@ -1553,7 +1866,7 @@ struct Direct3D12VDPRenderer::Impl {
 
         if (y > 0) {
             const bool renderLayers = vdp2.vramDirty || vdp2.cramDirty || vdp2.rotRegsDirty ||
-                                      vdp2.bgRenderParamsDirty || vdp2.composeParamsDirty;
+                                      vdp2.layerRenderParamsDirty || vdp2.composeParamsDirty;
             const bool compose = vdp2.composeParamsDirty;
             if (renderLayers) {
                 VDP2RenderLayerLines(y - 1);
@@ -1667,7 +1980,7 @@ void Direct3D12VDPRenderer::PostLoadStateSync() {
     m_impl->vdp2.vramDirty.SetAll();
     m_impl->vdp2.cramDirty = true;
     m_impl->vdp2.rotRegsDirty = true;
-    m_impl->vdp2.bgRenderParamsDirty = true;
+    m_impl->vdp2.layerRenderParamsDirty = true;
     m_impl->vdp2.composeParamsDirty = true;
 }
 
