@@ -13,7 +13,8 @@ struct WindowParams {
     bool window1Invert;
 };
 
-struct WindowParamsS : WindowParams {
+struct WindowParamsS {
+    WindowParams base;
     bool spriteWindowEnable;
     bool spriteWindowInvert;
 };
@@ -46,7 +47,8 @@ struct BaseBGParams {
     WindowParamsS windowParams;
 };
 
-struct NBGParams : BaseBGParams {
+struct NBGParams {
+    BaseBGParams base;
     uint2 bitmapSize;
     uint2 scrollAmount;
     uint2 scrollInc;
@@ -62,7 +64,8 @@ struct NBGParams : BaseBGParams {
     uint vcellScrollRepeat;
 };
 
-struct RBGParams : BaseBGParams {
+struct RBGParams {
+    BaseBGParams base;
     uint screenOverProcess;
     uint screenOverPatternName;
     uint pageBaseAddresses[2][16];

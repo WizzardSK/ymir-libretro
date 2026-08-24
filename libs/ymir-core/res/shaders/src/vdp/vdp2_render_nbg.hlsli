@@ -14,7 +14,7 @@ uint4 DrawNBG(uint2 pos,  // pixel coordinates
               Buffer<uint4> cramColor,
               StructuredBuffer<LayerRenderParams> layerParams) {
     NBGParams params = layerParams[0].nbg[index];
-    if (params.enabled) {
+    if (params.base.enabled) {
         return uint4(255, 255, 255, 255);
     }
     const uint value = vram.Load(pos.x * 4 + pos.y * 1024 + index * 65536);
