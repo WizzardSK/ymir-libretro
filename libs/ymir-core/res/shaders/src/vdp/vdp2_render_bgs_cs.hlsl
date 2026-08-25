@@ -7,7 +7,7 @@ cbuffer RenderParams : register(b0) {
     RenderParams g_renderParams;
 }
 
-ByteAddressBuffer vram : register(t0);
+[[vk::storage_buffer]] ByteAddressBuffer vram : register(t0);
 Buffer<uint4> cramColor : register(t1);
 StructuredBuffer<LayerRenderParams> layerParams : register(t2);
 

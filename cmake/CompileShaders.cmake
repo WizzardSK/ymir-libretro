@@ -593,7 +593,6 @@ function(_shader_make_compile_metal_command)
             COMMAND "${SPIRV_CROSS_EXECUTABLE}"
                 "${ARG_SPIRV_SOURCE}"
                 --msl
-                --msl-force-active-argument-buffer-resources
                 --output "${ARG_METAL_DESTINATION}"
             COMMAND "${METAL_EXECUTABLE}"
                 ${_metal_compile_flags}
