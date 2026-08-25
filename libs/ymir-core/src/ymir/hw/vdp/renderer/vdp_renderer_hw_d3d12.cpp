@@ -80,6 +80,7 @@ struct ColorR8G8B8A8 {
 };
 static_assert(sizeof(ColorR8G8B8A8) == sizeof(uint32));
 
+using HLSLbool = uint32; // bools align to 4 bytes
 using HLSLint = sint32;
 using HLSLuint = uint32;
 
@@ -632,19 +633,19 @@ struct Direct3D12VDPRenderer::Impl {
         // Window logic
         //   false = OR
         //   true = AND
-        bool windowLogicAnd;
+        HLSLbool windowLogicAnd;
 
         // Window 0 enable
-        bool window0Enable;
+        HLSLbool window0Enable;
 
         // Window 0 invert
-        bool window0Invert;
+        HLSLbool window0Invert;
 
         // Window 1 enable
-        bool window1Enable;
+        HLSLbool window1Enable;
 
         // Window 1 invert
-        bool window1Invert;
+        HLSLbool window1Invert;
     };
 
     /// @brief VDP2 extended window parameters (includes sprite window).
@@ -652,24 +653,24 @@ struct Direct3D12VDPRenderer::Impl {
         VDP2WindowParams base;
 
         // Sprite window enable
-        bool spriteWindowEnable;
+        HLSLbool spriteWindowEnable;
 
         // Sprite window invert
-        bool spriteWindowInvert;
+        HLSLbool spriteWindowInvert;
     };
 
     /// @brief Base VDP2 layer rendering parameters, common to NBGs and RBGs.
     struct VDP2BaseBGParams {
         // Background enabled
-        bool enabled;
+        HLSLbool enabled;
 
         // If true, honor transparency bit in color data.
         // Derived from BGON.xxTPON
-        bool enableTransparency;
+        HLSLbool enableTransparency;
 
         // Whether the background uses cells (false) or a bitmap (true).
         // Derived from CHCTLA/CHCTLB.xxBMEN
-        bool bitmap;
+        HLSLbool bitmap;
 
         // Priority number from 0 (transparent) to 7 (highest).
         // Derived from PRINA/PRINB/PRIR.xxPRINn
@@ -716,20 +717,20 @@ struct Direct3D12VDPRenderer::Impl {
         // Enables the mosaic effect.
         // If vertical cell scroll is also enabled, the mosaic effect is bypassed.
         // Derived from MZCTL.xxMZE
-        bool mosaicEnable;
+        HLSLbool mosaicEnable;
 
         // Enables color calculation.
         // Derived from CCCTL.xxCCEN
-        bool colorCalcEnable;
+        HLSLbool colorCalcEnable;
 
         // Character number width: 10 bits (false) or 12 bits (true).
         // When true, disables the horizontal and vertical flip bits in the character.
         // Derived from PNCNn/PNCR.xxCNSM
-        bool extChar;
+        HLSLbool extChar;
 
         // Whether characters use one (false) or two (true) words.
         // Derived from PNCNn/PNCR.xxPNB
-        bool twoWordChar;
+        HLSLbool twoWordChar;
 
         // Whether pattern name data is accessible for each VRAM bank (bits 0 to 3: A0, A1, B0, B1).
         // Derived from CYCxn, RAMCTL and BGON (for RBG0/1 restrictions to NBGs)
@@ -791,22 +792,22 @@ struct Direct3D12VDPRenderer::Impl {
         // Whether to use the vertical cell scroll table in VRAM.
         // Only valid for NBG0 and NBG1.
         // Derived from SCRCTL.NnVCSC
-        bool vcellScrollEnable;
+        HLSLbool vcellScrollEnable;
 
         // Whether to use the horizontal line scroll table in VRAM.
         // Only valid for NBG0 and NBG1.
         // Derived from SCRCTL.NnLSCX
-        bool lineScrollXEnable;
+        HLSLbool lineScrollXEnable;
 
         // Whether to use the vertical line scroll table in VRAM.
         // Only valid for NBG0 and NBG1.
         // Derived from SCRCTL.NnLSCY
-        bool lineScrollYEnable;
+        HLSLbool lineScrollYEnable;
 
         // Whether to use horizontal line zoom/scaling.
         // Only valid for NBG0 and NBG1.
         // Derived from SCRCTL.NnLZMX
-        bool lineZoomEnable;
+        HLSLbool lineZoomEnable;
 
         // Line scroll table interval shift. The interval is calculated as (1 << lineScrollInterval).
         // Only valid for NBG0 and NBG1.
@@ -1825,7 +1826,7 @@ struct Direct3D12VDPRenderer::Impl {
             // rotParams.coeffUseLineColorData;
 
             RBGParams &renderParams = vdp2.cpuLayerRenderParams.rbg[i];
-            renderParams.base.enabled = regs2.bgEnabled[i];
+            renderParams.base.enabled = regs2.bgEnabled[i + 4];
             renderParams.base.enableTransparency = bgParams.enableTransparency;
             renderParams.base.bitmap = bgParams.bitmap;
             renderParams.base.priorityNumber = bgParams.priorityNumber;
@@ -2073,6 +2074,8 @@ struct Direct3D12VDPRenderer::Impl {
             // const uint32 hres = HRes >> hresShift;
             // vdp2.cmdList->Dispatch(hres / 32, numLines, 1);
         }
+
+        vdp2.cpuCommonRenderParams.startY = startY << yShift;
 
         // TODO: Draw sprite layer
         // cmdList->Dispatch((ScaleUpCeil(m_HRes) + 31) / 32, numScaledLines, enhancements.transparentMeshes ? 2 : 1);
