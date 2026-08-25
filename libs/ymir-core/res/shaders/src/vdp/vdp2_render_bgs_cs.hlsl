@@ -20,6 +20,6 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     if (id.z <= 3) {
         bgOut[outCoord] = DrawNBG(drawCoord, id.z, vram, cramColor, layerParams);
     } else if (id.z <= 5) {
-        bgOut[outCoord] = DrawRBG(drawCoord, id.z - 4);
+        bgOut[outCoord] = DrawRBG(drawCoord, id.z - 4, vram, cramColor, layerParams);
     }
 }

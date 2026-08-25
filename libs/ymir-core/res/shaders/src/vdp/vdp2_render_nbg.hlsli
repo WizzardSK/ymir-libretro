@@ -14,13 +14,15 @@ uint4 DrawNBG(uint2 pos, // pixel coordinates
               Buffer<uint4> cramColor,
               StructuredBuffer<LayerRenderParams> layerParams) {
     NBGParams params = layerParams[0].nbg[index];
-    const uint xorValue = params.base.enabled ? 255 : 0;
+    if (!params.base.enabled) {
+        return kTransparentPixel;
+    }
     const uint value = vram.Load(pos.x * 4 + pos.y * 1024);
     return uint4(
-        BitExtract(value, 0, 8) ^ xorValue,
-        BitExtract(value, 8, 8) ^ xorValue,
-        BitExtract(value, 16, 8) ^ xorValue,
-        BitExtract(value, 24, 8) ^ xorValue ^ (index << 6)
+        BitExtract(value, 0, 8) ^ index,
+        BitExtract(value, 8, 8) ^ index,
+        BitExtract(value, 16, 8) ^ index,
+        BitExtract(value, 24, 8) ^ index
     );
 }
 

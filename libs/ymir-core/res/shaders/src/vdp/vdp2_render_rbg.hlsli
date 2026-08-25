@@ -6,8 +6,17 @@
 #include "vdp2_utils.hlsli"
 
 #include "util/bit_ops.hlsli"
+#include "util/data_ops.hlsli"
 
-uint4 DrawRBG(uint2 pos, uint index) {
+uint4 DrawRBG(uint2 pos, // pixel coordinates
+              uint index, // RBG index (0 to 1)
+              ByteAddressBuffer vram,
+              Buffer<uint4> cramColor,
+              StructuredBuffer<LayerRenderParams> layerParams) {
+    RBGParams params = layerParams[0].rbg[index];
+    if (!params.base.enabled) {
+        return kTransparentPixel;
+    }
     return uint4(pos.x, pos.y, index, 1);
 }
 
