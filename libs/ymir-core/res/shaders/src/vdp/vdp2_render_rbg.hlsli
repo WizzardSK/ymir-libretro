@@ -10,7 +10,7 @@
 
 uint4 DrawRBG(uint2 pos, // pixel coordinates
               uint index, // RBG index (0 to 1)
-              const ByteAddressBuffer vram,
+              ByteAddressBuffer vram,
               Buffer<uint4> cramColor,
               StructuredBuffer<LayerRenderParams> layerParams) {
     RBGParams params = layerParams[0].rbg[index];
