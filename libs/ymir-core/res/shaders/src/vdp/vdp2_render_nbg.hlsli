@@ -10,7 +10,7 @@
 
 uint4 DrawNBG(uint2 pos, // pixel coordinates
               uint index, // NBG index (0 to 3)
-              ByteAddressBuffer vram,
+              const ByteAddressBuffer vram,
               Buffer<uint4> cramColor,
               StructuredBuffer<LayerRenderParams> layerParams) {
     NBGParams params = layerParams[0].nbg[index];
