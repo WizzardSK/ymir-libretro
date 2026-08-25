@@ -7,9 +7,9 @@ cbuffer RenderParams : register(b0) {
     RenderParams g_renderParams;
 }
 
-ByteAddressBuffer vram : register(t0);
-Buffer<uint4> cramColor : register(t1);
-StructuredBuffer<LayerRenderParams> layerParams : register(t2);
+ByteAddressBuffer vram : register(t1);
+Buffer<uint4> cramColor : register(t2);
+StructuredBuffer<LayerRenderParams> layerParams : register(t3);
 
 RWTexture2DArray<uint4> bgOut : register(u0);
 

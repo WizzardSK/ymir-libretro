@@ -1350,7 +1350,9 @@ struct Direct3D12VDPRenderer::Impl {
 
             auto rootSigBuilder = vdp2.drawBGsRootSig.Builder();
             rootSigBuilder.Add32BitConstants(0, sizeof(VDP2CommonRenderParams) / sizeof(uint32));
-            rootSigBuilder.AddDescriptorTable().AddSRVs(3, 0).AddUAVs(1, 0);
+            rootSigBuilder.AddDescriptorTable()
+                .AddSRVs(3, 1) // NOTE: starting from 1 because SPIRV-Cross assumes buffers in t0 are constant
+                .AddUAVs(1, 0);
             if (HRESULT hr = rootSigBuilder.Build(device); FAILED(hr)) {
                 return util::ErrorMessage{fmt::format(
                     "Could not build VDP2 background layer rendering root signature, error code {:X}", (uint32)hr)};
